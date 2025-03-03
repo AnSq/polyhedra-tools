@@ -1,0 +1,7 @@
+env/
+__pycache__/
+*.json
+*.jsonl
+*.csv
+mcp1.py
+names.py
