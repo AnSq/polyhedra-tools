@@ -45,7 +45,7 @@ class Face:
     def __repr__(self) -> str:
         return str(self)
 
-    def points_array(self):
+    def points_array(self) -> list[list[float]]:
         return [p.coords for p in self.points]
 
     @property
@@ -132,6 +132,10 @@ class Mesh:
     def load(cls, fname, *, info=False):
         with open(fname) as f:
             return cls.loads(f.read(), info=fname if info else "")
+
+
+    def points_array(self) -> list[list[float]]:
+        return [p.coords for p in self.points]
 
 
 if __name__ == "__main__":

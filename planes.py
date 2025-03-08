@@ -10,10 +10,12 @@ import pprint
 
 from typing import TypeAlias
 
-from skspatial.objects import Plane, Points
+from skspatial.objects import Plane, Points, LineSegment
 
 import numpy as np
 from SetCoverPy import setcover  #type: ignore
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.axes3d import Axes3D
 
 import off
 
@@ -190,7 +192,7 @@ def minimum_covering_planes(mesh:off.Mesh, planes_set:PlaneSet, j_number:int=Non
         for j in planes_list[i]:
             matrix[i,j] = 1
 
-    sc = setcover.SetCover(matrix.T, np.ones((len(planes_list),), dtype=np.byte))
+    sc = setcover.SetCover(matrix.T, np.ones((len(planes_list),), dtype=np.byte), 40, 30, 200)
     solution_size, minutes = sc.SolveSCP()
 
     try:
@@ -263,6 +265,30 @@ def create_db_from_mcp_files(mcp_files:list[str], meshes:dict[int,off.Mesh], db_
         # json.dump(db, f, default=json_set_default)
 
 
+def plot_mesh(mesh:off.Mesh, plane_ind:frozenset[int]):
+    ax:Axes3D
+    fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+
+    p = Points(mesh.points_array())
+    p.plot_3d(ax, color="black")
+
+    for e in mesh.edges:
+        ls = LineSegment(e.p0.coords, e.p1.coords)
+        ls.plot_3d(ax, color="gray", lw=1)
+
+    ax.set_aspect("equal")
+    xmin, xmax, ymin, ymax, zmin, zmax = ax.get_w_lims()
+
+    plane = Plane.from_points(*[mesh.points[i].coords for i in list(plane_ind)[:3]])
+    plane.plot_3d(ax, (xmin-plane.point[0], xmax-plane.point[0]), (ymin-plane.point[1], ymax-plane.point[1]), color="#0f0f0f80")
+
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    ax.set_zlim(zmin, zmax)
+
+    plt.show()
+
+
 if __name__ == "__main__":
     if sys.argv[1][0] == "f":
         find_planes(load_meshes())
@@ -287,4 +313,17 @@ if __name__ == "__main__":
         find_bins(load_planes())
 
     elif sys.argv[1][0] == "d":
-        create_db_from_mcp_files(["minimum_covering_planes1.jsonl","minimum_covering_planes2.jsonl","minimum_covering_planes3.jsonl","minimum_covering_planes4.jsonl","minimum_covering_planes.jsonl",], load_meshes())
+        create_db_from_mcp_files(
+            ["minimum_covering_planes1.jsonl",
+            "minimum_covering_planes2.jsonl",
+            "minimum_covering_planes3.jsonl",
+            "minimum_covering_planes4.jsonl",
+            "minimum_covering_planes5.jsonl",
+            "minimum_covering_planes6.jsonl",
+            "minimum_covering_planes.jsonl",],
+            load_meshes())
+
+    elif sys.argv[1][0] == "3":
+        meshes = load_meshes()
+        # plot_mesh(meshes[int(sys.argv[2])])
+        plot_mesh(meshes[6], frozenset([5, 6, 7, 8, 9]))
