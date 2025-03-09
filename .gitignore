@@ -2,6 +2,8 @@ env/
 __pycache__/
 *.json
 *.jsonl
+*.txt
 *.csv
 mcp1.py
 names.py
+database.db*

@@ -96,8 +96,8 @@ class Mesh:
         vertices:list[Vertex] = []
         for v in range(nvertices):
             line = next(lines)
-            point_indexes, y, z = (float(i) for i in line.split())
-            vertices.append(Vertex(v, point_indexes, y, z))
+            x, y, z = (float(i) for i in line.split())
+            vertices.append(Vertex(v, x, y, z))
 
         faces:list[Face] = []
         edge_point_indexes:set[tuple[int,int]] = set()
@@ -107,7 +107,7 @@ class Mesh:
             count = next(g)
             point_indexes = list(g)
             assert count == len(point_indexes)
-            face_edges = set(tuple(sorted(x)) for x in zip(point_indexes, point_indexes[1:]+[point_indexes[0]]))
+            face_edges = set((min(x), max(x)) for x in zip(point_indexes, point_indexes[1:]+[point_indexes[0]]))
             edge_point_indexes |= face_edges
             faces.append(Face(f, [vertices[i] for i in point_indexes]))
 
