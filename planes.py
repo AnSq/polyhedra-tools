@@ -9,10 +9,12 @@ import argparse
 
 from typing import TypeAlias
 
-from skspatial.objects import Plane, Points, LineSegment
+from skspatial.objects import Plane, Point, Points, LineSegment, Vector
 
 import numpy as np
 from SetCoverPy import setcover  #type: ignore
+
+import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.axes3d import Axes3D  #type: ignore
 
@@ -24,18 +26,6 @@ logging.captureWarnings(True)
 
 TOLERANCE = 1e-12
 DB_FILE = "database.db"
-
-
-# def json_default(obj):
-#     """pass as default param to json.dump to allow dumping sets as lists"""
-#     if isinstance(obj, (set, frozenset)):
-#         return list(obj)
-#     elif isinstance(obj, shelve.Shelf):
-#         return dict(obj)
-#     elif isinstance(obj, off.Mesh):
-#         return str(obj)
-#     print(type(obj))
-#     raise TypeError
 
 
 def open_db(fname=DB_FILE) -> shelve.Shelf:
@@ -212,16 +202,16 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
 
     if db[name]["best_solution"] is None:
         db[name]["best_solution"] = solution_size
-        db[name]["solutions"] = set([solution])
+        db[name]["solutions"] = [solution]
         db[name]["num_solutions"] = 1
         print(f"[{name}] Found solution: {solution_size}")
     elif solution_size < db[name]["best_solution"]:
         db[name]["best_solution"] = solution_size
-        db[name]["solutions"] = set([solution])
+        db[name]["solutions"] = [solution]
         db[name]["num_solutions"] = 1
         print(f"[{name}] Found better solution: {solution_size}")
     elif db[name]["best_solution"] == solution_size and solution not in db[name]["solutions"]:
-        db[name]["solutions"].add(solution)
+        db[name]["solutions"].append(solution)
         db[name]["num_solutions"] += 1
         print(f"[{name}]\tFound alternate solution: {solution_size}")
 
@@ -238,7 +228,13 @@ def all_minimum_covering_planes(db:shelve.Shelf) -> None:
 def str_solutions(db:shelve.Shelf, sep="\t") -> str:
     result = sep.join(("name","best_solution","num_solutions","upper_bound","ub_reason")) + "\n"
     for name in db:
-        result += sep.join(str(i) for i in (name, db[name]["best_solution"], db[name]["num_solutions"], db[name]["upper_bound"], db[name]["ub_reason"])) + "\n"
+        result += sep.join(str(i) for i in (
+            name,
+            db[name]["best_solution"],
+            db[name]["num_solutions"],
+            db[name]["upper_bound"],
+            db[name]["ub_reason"]
+        )) + "\n"
     return result
 
 
@@ -251,36 +247,69 @@ def save_solutions_csv(db:shelve.Shelf, outfile:str):
         f.write(str_solutions(db, ","))
 
 
-def plot_mesh(mesh:off.Mesh, plane_ind:frozenset[int]):  #TODO
+def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]]):  #TODO
+    planes = list(planes_fs)
+    covered_points:set[int] = set()
+    point_colors:dict[int,int] = {}
+
+    for i, plane in enumerate(planes):
+        for point_index in plane:
+            if point_index not in covered_points:
+                covered_points.add(point_index)
+                point_colors[point_index] = i
+
     ax:Axes3D
     fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+    ax.set_axis_off()
+    colors = matplotlib.color_sequences["petroff10"]
 
-    p = Points(mesh.points_array())
-    p.plot_3d(ax, color="black")
+    # origin vectors
+    for vec, color in (
+        ((1,0,0), "red"),
+        ((0,1,0), "green"),
+        ((0,0,1), "blue")
+    ):
+        v = Vector(vec)
+        v.plot_3d(ax, color=(color, 0.5))
+
+    for i, point in enumerate(mesh.points):
+        p = Point(point.coords)
+        p.plot_3d(ax, color=colors[point_colors[i] % len(colors)])
 
     for e in mesh.edges:
         ls = LineSegment(e.p0.coords, e.p1.coords)
-        ls.plot_3d(ax, color="gray", lw=1)
+        ls.plot_3d(ax, color=("gray", 0.8), lw=1)
 
     ax.set_aspect("equal")
     xmin, xmax, ymin, ymax, zmin, zmax = ax.get_w_lims()
 
-    plane = Plane.from_points(*[mesh.points[i].coords for i in list(plane_ind)[:3]])
-    plane.plot_3d(ax, (xmin-plane.point[0], xmax-plane.point[0]), (ymin-plane.point[1], ymax-plane.point[1]), color="#0f0f0f80")
+    for i, plane in enumerate(planes):
+        coords = [mesh.points[j].coords for j in plane]
+        xcoords = [j[0] for j in coords]
+        ycoords = [j[1] for j in coords]
+        pad = 0.1
+        x0 = min(xcoords) - pad
+        x1 = max(xcoords) + pad
+        y0 = min(ycoords) - pad
+        y1 = max(ycoords) + pad
+        pl = Plane.from_points(*coords[:3])
+        pl.plot_3d(ax, (x0-pl.point[0], x1-pl.point[0]), (y0-pl.point[1], y1-pl.point[1]), color=(colors[i % len(colors)], 0.25))
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_zlim(zmin, zmax)
 
+    fig.tight_layout()
     plt.show()
 
 
 def list_database(db:shelve.Shelf) -> None:
     print("name\tvertices\tedges\tfaces\tbest_solution\tnum_solutions\tupper_bound\tub_reason\tnum_planes")
     for name in db:
-        v = len(db[name]["mesh"].points)
-        e = len(db[name]["mesh"].edges)
-        f = len(db[name]["mesh"].faces)
+        mesh:off.Mesh = db[name]["mesh"]
+        v = len(mesh.points)
+        e = len(mesh.edges)
+        f = len(mesh.faces)
         print(f'{name}\t{v}\t{e}\t{f}\t{db[name]["best_solution"]}\t{db[name]["num_solutions"]}\t{db[name]["upper_bound"]}\t{db[name]["ub_reason"]}\t{len(db[name]["planes"])}')
 
 
@@ -305,6 +334,7 @@ if __name__ == "__main__":
     minimum_covering_planes_parser = subparsers.add_parser("minimum-covering-planes", aliases=["mcp"], help="find the minimum covering planes of the given mesh")
     minimum_covering_planes_parser.set_defaults(cmd="minimum-covering-planes")
     minimum_covering_planes_parser.add_argument("name", help="name of the mesh")
+    minimum_covering_planes_parser.add_argument("--quiet", "-q", action="store_true", help="don't print full solution. Only print when there's a new solution")
 
     all_minimum_covering_planes_parser = subparsers.add_parser("all-minimum-covering-planes", aliases=["amcp"], help="find the minimum covering planes of all meshes")
     all_minimum_covering_planes_parser.set_defaults(cmd="all-minimum-covering-planes")
@@ -316,8 +346,12 @@ if __name__ == "__main__":
     list_parser = subparsers.add_parser("list", aliases=["l"], help="list some stuff about meshes in the database")
     list_parser.set_defaults(cmd="list")
 
+    plot_solution_parser = subparsers.add_parser("plot-solution", aliases=["plot", "p"], help="make a 3d plot of a solution")
+    plot_solution_parser.set_defaults(cmd="plot-solution")
+    plot_solution_parser.add_argument("name", help="name of the mesh")
+    plot_solution_parser.add_argument("--solution", "-s", type=int, default=0, help="solution number")
+
     args = parser.parse_args()
-    print(args)
 
     with open_db() as db:
         if args.cmd == "load-mesh":
@@ -328,7 +362,8 @@ if __name__ == "__main__":
             find_all_planes(db, args.overwrite)
         elif args.cmd == "minimum-covering-planes":
             solution_size, solution, t_seconds = minimum_covering_planes(db, args.name)
-            print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
+            if not args.quiet:
+                print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
         elif args.cmd == "all-minimum-covering-planes":
             all_minimum_covering_planes(db)
         elif args.cmd == "show-solutions":
@@ -338,3 +373,7 @@ if __name__ == "__main__":
                 print_solutions(db)
         elif args.cmd == "list":
             list_database(db)
+        elif args.cmd == "plot-solution":
+            mesh = db[args.name]["mesh"]
+            solution = db[args.name]["solutions"][args.solution]
+            plot_solution(mesh, solution)
