@@ -7,3 +7,4 @@ __pycache__/
 mcp1.py
 names.py
 database.db*
+*.png

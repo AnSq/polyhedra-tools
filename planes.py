@@ -8,6 +8,7 @@ import logging
 import argparse
 
 from typing import TypeAlias
+from collections.abc import Sequence
 
 from skspatial.objects import Plane, Point, Points, LineSegment, Vector
 
@@ -17,6 +18,7 @@ from SetCoverPy import setcover  #type: ignore
 import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.axes3d import Axes3D  #type: ignore
+import mpl_toolkits.mplot3d.art3d as art3d  #type: ignore
 
 import off
 
@@ -220,9 +222,10 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
     return (solution_size, solution, minutes*60)
 
 
-def all_minimum_covering_planes(db:shelve.Shelf) -> None:
+def all_minimum_covering_planes(db:shelve.Shelf, range_:Sequence[int]=None) -> None:
     for name in db:
-        minimum_covering_planes(db, name)
+        if range_ is None or (range_[0] <= db[name]["best_solution"] <= range_[1]):
+            minimum_covering_planes(db, name)
 
 
 def str_solutions(db:shelve.Shelf, sep="\t") -> str:
@@ -247,7 +250,7 @@ def save_solutions_csv(db:shelve.Shelf, outfile:str):
         f.write(str_solutions(db, ","))
 
 
-def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]]):  #TODO
+def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], origin_vectors:float=0):
     planes = list(planes_fs)
     covered_points:set[int] = set()
     point_colors:dict[int,int] = {}
@@ -265,17 +268,19 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]]):  #TODO
 
     # origin vectors
     for vec, color in (
-        ((1,0,0), "red"),
-        ((0,1,0), "green"),
-        ((0,0,1), "blue")
+        ((origin_vectors,0,0), "red"),
+        ((0,origin_vectors,0), "green"),
+        ((0,0,origin_vectors), "blue")
     ):
         v = Vector(vec)
         v.plot_3d(ax, color=(color, 0.5))
 
+    # vertices
     for i, point in enumerate(mesh.points):
         p = Point(point.coords)
         p.plot_3d(ax, color=colors[point_colors[i] % len(colors)])
 
+    # edges
     for e in mesh.edges:
         ls = LineSegment(e.p0.coords, e.p1.coords)
         ls.plot_3d(ax, color=("gray", 0.8), lw=1)
@@ -283,17 +288,37 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]]):  #TODO
     ax.set_aspect("equal")
     xmin, xmax, ymin, ymax, zmin, zmax = ax.get_w_lims()
 
+    # covering planes
     for i, plane in enumerate(planes):
         coords = [mesh.points[j].coords for j in plane]
-        xcoords = [j[0] for j in coords]
-        ycoords = [j[1] for j in coords]
-        pad = 0.1
-        x0 = min(xcoords) - pad
-        x1 = max(xcoords) + pad
-        y0 = min(ycoords) - pad
-        y1 = max(ycoords) + pad
+
         pl = Plane.from_points(*coords[:3])
-        pl.plot_3d(ax, (x0-pl.point[0], x1-pl.point[0]), (y0-pl.point[1], y1-pl.point[1]), color=(colors[i % len(colors)], 0.25))
+        normal = pl.normal
+
+        xc = sum(c[0] for c in coords) / len(coords)
+        yc = sum(c[1] for c in coords) / len(coords)
+        zc = sum(c[2] for c in coords) / len(coords)
+        center = [xc, yc, zc]
+
+        start = coords[0]
+        vector_a = Vector.from_points(center, start)
+
+        angle_coords = []
+
+        for _, c in enumerate(coords):
+            vector_b = Vector.from_points(center, c)
+            if c == start:
+                angle = 0
+            elif vector_a.is_parallel(vector_b):
+                angle = vector_a.angle_between(vector_b)
+            else:
+                angle = vector_a.angle_signed_3d(vector_b, normal)
+            angle_coords.append((angle, c))
+
+        coords_sorted = [ac[1] for ac in sorted(angle_coords)]
+
+        polygon = art3d.Poly3DCollection([coords_sorted], color=(colors[i % len(colors)], 0.25), lw=0)
+        ax.add_collection3d(polygon)
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
@@ -338,6 +363,7 @@ if __name__ == "__main__":
 
     all_minimum_covering_planes_parser = subparsers.add_parser("all-minimum-covering-planes", aliases=["amcp"], help="find the minimum covering planes of all meshes")
     all_minimum_covering_planes_parser.set_defaults(cmd="all-minimum-covering-planes")
+    all_minimum_covering_planes_parser.add_argument("--solution-range", "-r", nargs=2, type=int, metavar=("MIN", "MAX"), help="only recalculate solutions in the given range")
 
     show_solutions_parser = subparsers.add_parser("show-solutions", aliases=["show", "solutions", "s"], help="show or save the calculated solutions")
     show_solutions_parser.set_defaults(cmd="show-solutions")
@@ -350,6 +376,7 @@ if __name__ == "__main__":
     plot_solution_parser.set_defaults(cmd="plot-solution")
     plot_solution_parser.add_argument("name", help="name of the mesh")
     plot_solution_parser.add_argument("--solution", "-s", type=int, default=0, help="solution number")
+    plot_solution_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
 
     args = parser.parse_args()
 
@@ -365,7 +392,7 @@ if __name__ == "__main__":
             if not args.quiet:
                 print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
         elif args.cmd == "all-minimum-covering-planes":
-            all_minimum_covering_planes(db)
+            all_minimum_covering_planes(db, args.solution_range)
         elif args.cmd == "show-solutions":
             if args.output is not None:
                 save_solutions_csv(db, args.output)
@@ -376,4 +403,4 @@ if __name__ == "__main__":
         elif args.cmd == "plot-solution":
             mesh = db[args.name]["mesh"]
             solution = db[args.name]["solutions"][args.solution]
-            plot_solution(mesh, solution)
+            plot_solution(mesh, solution, args.origin_vectors)
