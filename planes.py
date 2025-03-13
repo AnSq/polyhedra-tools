@@ -6,8 +6,9 @@ import math
 import shelve
 import logging
 import argparse
+import functools
 
-from typing import TypeAlias
+from typing import Callable, TypeAlias
 from collections.abc import Sequence
 
 from skspatial.objects import Plane, Point, Points, LineSegment, Vector
@@ -19,6 +20,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.axes3d import Axes3D  #type: ignore
 import mpl_toolkits.mplot3d.art3d as art3d  #type: ignore
+import matplotlib.animation as animation  #type: ignore
+from matplotlib.figure import Figure
 
 import off
 
@@ -326,7 +329,17 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], origin_vec
     ax.set_zlim(zmin, zmax)
 
     fig.tight_layout()
-    plt.show()
+    return (fig, ax)
+
+
+def animation_rotate(i:int, *, ax:Axes3D):
+    ax.view_init(30, i*3, 0)
+
+
+def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int):
+    anim = animation.FuncAnimation(fig, func=functools.partial(anim_func, ax=ax), frames=num_frames, interval=33)
+    writer = animation.FFMpegWriter(30)
+    anim.save("animation.mp4", writer)
 
 
 def list_database(db:shelve.Shelf) -> None:
@@ -380,6 +393,13 @@ if __name__ == "__main__":
     plot_solution_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
     plot_solution_parser.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
 
+    animate_solution_parser = subparsers.add_parser("animate-solution", aliases=["a"], help="animate a solution rotating")
+    animate_solution_parser.set_defaults(cmd="animate-solution")
+    animate_solution_parser.add_argument("--mesh", "-m", dest="name", help="which mesh to show")
+    animate_solution_parser.add_argument("--solution", "-s", type=int, default=0, help="solution number")
+    animate_solution_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
+    animate_solution_parser.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
+
     args = parser.parse_args()
 
     with open_db() as db:
@@ -405,4 +425,11 @@ if __name__ == "__main__":
         elif args.cmd == "plot-solution":
             mesh = db[args.name]["mesh"]
             solution = db[args.name]["solutions"][args.solution]
-            plot_solution(mesh, solution, args.origin_vectors, not args.hide_edges)
+            fig, ax = plot_solution(mesh, solution, args.origin_vectors, not args.hide_edges)
+            plt.show()
+        elif args.cmd == "animate-solution":
+            mesh = db[args.name]["mesh"]
+            solution = db[args.name]["solutions"][args.solution]
+            fig, ax = plot_solution(mesh, solution, args.origin_vectors, not args.hide_edges)
+            animate_solution(fig, ax, animation_rotate, 120)
+            # plt.show()

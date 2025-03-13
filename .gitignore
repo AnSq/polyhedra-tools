@@ -8,3 +8,5 @@ mcp1.py
 names.py
 database.db*
 *.png
+*.mp4
+*.html
