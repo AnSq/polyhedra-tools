@@ -250,8 +250,8 @@ def save_solutions_csv(db:shelve.Shelf, outfile:str):
         f.write(str_solutions(db, ","))
 
 
-def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], origin_vectors:float=0):
-    planes = list(planes_fs)
+def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], origin_vectors:float=0, show_edges=True):
+    planes = list(planes_fs)  #TODO: sort for stable coloring?
     covered_points:set[int] = set()
     point_colors:dict[int,int] = {}
 
@@ -281,9 +281,10 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], origin_vec
         p.plot_3d(ax, color=colors[point_colors[i] % len(colors)])
 
     # edges
-    for e in mesh.edges:
-        ls = LineSegment(e.p0.coords, e.p1.coords)
-        ls.plot_3d(ax, color=("gray", 0.8), lw=1)
+    if show_edges:
+        for e in mesh.edges:
+            ls = LineSegment(e.p0.coords, e.p1.coords)
+            ls.plot_3d(ax, color=("gray", 0.5), lw=0.5)
 
     ax.set_aspect("equal")
     xmin, xmax, ymin, ymax, zmin, zmax = ax.get_w_lims()
@@ -377,6 +378,7 @@ if __name__ == "__main__":
     plot_solution_parser.add_argument("name", help="name of the mesh")
     plot_solution_parser.add_argument("--solution", "-s", type=int, default=0, help="solution number")
     plot_solution_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
+    plot_solution_parser.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
 
     args = parser.parse_args()
 
@@ -403,4 +405,4 @@ if __name__ == "__main__":
         elif args.cmd == "plot-solution":
             mesh = db[args.name]["mesh"]
             solution = db[args.name]["solutions"][args.solution]
-            plot_solution(mesh, solution, args.origin_vectors)
+            plot_solution(mesh, solution, args.origin_vectors, not args.hide_edges)
