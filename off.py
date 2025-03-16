@@ -133,6 +133,17 @@ class Mesh:
         with open(fname) as f:
             return cls.loads(f.read(), info=fname if info else "")
 
+    @property
+    def num_points(self):
+        return len(self.points)
+
+    @property
+    def num_edges(self):
+        return len(self.edges)
+
+    @property
+    def num_faces(self):
+        return len(self.faces)
 
     def points_array(self) -> list[list[float]]:
         return [p.coords for p in self.points]
