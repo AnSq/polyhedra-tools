@@ -26,6 +26,8 @@ import matplotlib.patches
 import matplotlib.lines
 import matplotlib.legend_handler
 
+from tqdm import tqdm
+
 import off
 
 PlaneSet:TypeAlias = set[frozenset[int]]
@@ -244,13 +246,13 @@ def find_duplicate_points(planes:list[frozenset[int]]) -> list[bool]:
     return result
 
 
-
 def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str, origin_vectors:float=0, show_edges=True):
     ax:Axes3D
     fig, ax = plt.subplots(figsize=(4.8, 4.8), subplot_kw={"projection": "3d"})
     ax.set_axis_off()
     colors = matplotlib.color_sequences["petroff10"]
-    matplotlib.rc("font", family="Montserrat")
+    fontfamily = "Montserrat"
+    matplotlib.rc("font", family=fontfamily)
 
     planes = list(planes_fs)
     planes.sort(key=lambda x: (-len(x), sorted(list(x))))
@@ -338,7 +340,7 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str,
     pad = 0.1
     fig.subplots_adjust(left=-pad, bottom=-pad, right=1+pad, top=1)
 
-    ax.set_title(title, y=1+pad, pad=-28, fontweight="medium")
+    ax.set_title(title, y=1+pad, pad=-28, fontfamily=[fontfamily], fontweight="medium")
 
     # mesh info legend
     meshinfo = fig.legend(handles=(
@@ -362,14 +364,25 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str,
     return (fig, ax)
 
 
-def animation_rotate(i:int, *, ax:Axes3D):
-    ax.view_init(30, i*3, 0)
+def rotation_function(x:int, total:int) -> tuple[float,float,float]:
+    """takes a frame number and the total number of frames and returns (elev, azim, roll) to apply to view"""
+    elev = 30 * math.sin(math.radians(360 * x / total))
+    azim = 360 * x / total % 360
+    roll = 0
+    return (elev, azim, roll)
 
 
-def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, fname:str, fmt:str="mp4"):
-    anim = animation.FuncAnimation(fig, func=functools.partial(anim_func, ax=ax), frames=num_frames, interval=33)
-    writer = animation.FFMpegWriter(30)
-    anim.save(f"{fname}.{fmt}", writer, progress_callback=lambda c,t: print(f"{c}/{t}"))
+def animation_rotate(i:int, *, ax:Axes3D, total:int):
+    ax.view_init(*rotation_function(i, total))
+
+
+def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, fname:str, tqdm_position:int=0):
+    anim = animation.FuncAnimation(fig, func=functools.partial(anim_func, ax=ax, total=num_frames), frames=num_frames, interval=33)
+    # plt.show()
+    writer = animation.FFMpegWriter(fps=30, codec="libvpx-vp9", extra_args=["-crf", "30", "-b:v", "0"])
+    os.makedirs("output/animation", exist_ok=True)
+    with tqdm(total=num_frames, desc=f"Saving animation {fname}", position=tqdm_position) as progress_bar:
+        anim.save(f"output/animation/{fname}.webm", writer, progress_callback=lambda c,t: progress_bar.update(1))
 
 
 def list_database(db:shelve.Shelf) -> None:
@@ -431,6 +444,9 @@ if __name__ == "__main__":
     save_plots_parser = subparsers.add_parser("save-plots", aliases=["sp"], help="save plot images")
     save_plots_parser.set_defaults(cmd="save-plots")
 
+    save_all_plots_parser = subparsers.add_parser("save-all-plots", aliases=["sap"], help="save plot images for every solution in the database")
+    save_all_plots_parser.set_defaults(cmd="save-all-plots")
+
     args = parser.parse_args()
 
     with open_db() as db:
@@ -464,22 +480,31 @@ if __name__ == "__main__":
             row = db[args.name]
             mesh = row["mesh"]
             solution = row["solutions"][args.solution]
-            # title = f'{row["fullname"]} ($J_{{{args.name[1:]}}}$)'
             title = f'{row["fullname"]} (J{args.name[1:]})'
             fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges)
-            # ax.set_facecolor("lightgray")
             if args.cmd == "plot-solution":
                 plt.show()
             elif args.cmd == "animate-solution":
-                animate_solution(fig, ax, animation_rotate, 120, args.name, "mp4")
+                animate_solution(fig, ax, animation_rotate, 120, args.name)
 
         elif args.cmd == "save-plots":
-            for name in db:
-                print(name)
+            for name in tqdm(db, "Saving plots"):
                 row = db[name]
                 mesh = row["mesh"]
                 solution = row["solutions"][0]
                 title = f'{row["fullname"]} ({name})'
                 fig, ax = plot_solution(mesh, solution, title)
-                os.makedirs("output", exist_ok=True)
-                fig.savefig(f"output/{name}.png")
+                os.makedirs("output/plots", exist_ok=True)
+                fig.savefig(f"output/plots/{name}.png")
+                plt.close(fig)
+
+        elif args.cmd == "save-all-plots":
+            for name in tqdm(db, "Saving all plots", position=0):
+                row = db[name]
+                mesh = row["mesh"]
+                title = f'{row["fullname"]} ({name})'
+                os.makedirs(f"output/plots/{name}", exist_ok=True)
+                for i, solution in enumerate(tqdm(row["solutions"], f"Saving {name}", position=1, leave=False)):
+                    fig, ax = plot_solution(mesh, solution, title)
+                    fig.savefig(f"output/plots/{name}/{name}_{i}.png")
+                    plt.close(fig)
