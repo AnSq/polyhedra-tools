@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import os
+import sys
 import time
 import itertools
 import math
@@ -8,7 +9,7 @@ import logging
 import argparse
 import functools
 
-from typing import Callable, TypeAlias
+from typing import Callable
 from collections.abc import Sequence
 
 from skspatial.objects import Plane, Point, Points, LineSegment, Vector
@@ -26,13 +27,23 @@ import matplotlib.patches
 import matplotlib.lines
 import matplotlib.legend_handler
 
-from tqdm import tqdm
+from tqdm import tqdm  #type: ignore
 
 import off
 
-PlaneSet:TypeAlias = set[frozenset[int]]
+PlaneSet = set[frozenset[int]]
 
 logging.captureWarnings(True)
+file_handler = logging.FileHandler(filename="planes.log", encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)  # file gets everything from this module
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.WARNING)  # stderr only gets warning and up
+logging.basicConfig(handlers=[file_handler, stream_handler], level=logging.WARNING)  # the default for imported modules is warning and up
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # this module logs everything, subject to the notes above on the handlers
+setcover_logger = logging.getLogger("setcover")
+
+setcover.np.seterr(divide="ignore", invalid="ignore")
 
 TOLERANCE = 1e-12
 DB_FILE = "database.db"
@@ -48,7 +59,20 @@ def load_mesh(db:shelve.Shelf, fname:str, clear=False) -> tuple[str,off.Mesh]:
     fullname = fullname.replace("_", " ")
 
     if clear:
-        del db[name]
+        if name in db:
+            row = db[name]
+            print(f"\nThe mesh {name} is already in the database:")
+            print(f"Full name: {row['fullname']}")
+            print(f"Mesh: {row['mesh']}")
+            print(f"Upper bound: {row['upper_bound']} ({row['ub_reason']})")
+            print(f"Best solution: {row['best_solution']} ({row['num_solutions']} solutions)")
+            print(f"Total planes: {len(row['planes'])}")
+            confirm = input(f"Are you sure you want to delete this entire database entry and replace it with the new mesh from '{fname}'?: ")
+            if confirm == "yes":
+                del db[name]
+            else:
+                print('Your answer was not "yes", so the mesh will not be loaded and the database will not be changed.')
+                return (None, None)
 
     mesh = off.Mesh.load(fname, info=True)
 
@@ -126,7 +150,7 @@ def find_planes(mesh:off.Mesh, name:str=None) -> PlaneSet:
         plane_max_points = max(plane_max_points, len(plane_points))
 
     t = round(time.time() - start_time, 2)
-    print(f"[{name}] faces: {mesh.num_faces}\t\tbiggest: {max(len(f.points) for f in mesh.faces)}\tplanes: {len(planes)}\tmax points: {plane_max_points}\ttime: {t}")
+    logger.info(f"[{name}] faces: {mesh.num_faces}\t\tbiggest: {max(len(f.points) for f in mesh.faces)}\tplanes: {len(planes)}\tmax points: {plane_max_points}\ttime: {t}")
     return planes
 
 
@@ -138,7 +162,7 @@ def find_all_planes(db:shelve.Shelf, overwrite=False) -> None:
                 db[name]["planes"] = find_planes(db[name]["mesh"], name)
                 db.sync()
             except ValueError as e:
-                print(e)
+                logger.error(e)
 
 
 def find_upper_bound(mesh:off.Mesh, name:str=None, print_=False) -> tuple[int,str]:
@@ -161,12 +185,13 @@ def find_upper_bound(mesh:off.Mesh, name:str=None, print_=False) -> tuple[int,st
         reason += " unique_z"
 
     if print_:
-        msg = f"{name} {values} | starting bssf = {ub} | from:"
+        msg = f"{name} {values} | upper bound = {ub} | from:"
         print(msg + reason)
     return (ub, reason.strip())
 
 
 def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[frozenset[int]],float]:
+    logger.info(f"calculating minimum covering planes of {name}")
     mesh:off.Mesh = db[name]["mesh"]
     planes_list:list[frozenset[int]] = list(db[name]["planes"])
     plane_sort_key = lambda x: (len(x), sorted(x))
@@ -183,7 +208,7 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
 
     ub, reason = find_upper_bound(mesh)
     if solution_size > ub:
-        print(f"[{name}] found solution {solution_size} is worse than upper bound {ub} ({reason})")
+        logger.warning(f"[{name}] found solution {solution_size} is worse than upper bound {ub} ({reason})")
 
     solution_set_indexes = [int(i) for i in range(len(sc.s)) if sc.s[i]]
     solution = frozenset(planes_list[i] for i in solution_set_indexes)
@@ -192,16 +217,16 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
         db[name]["best_solution"] = solution_size
         db[name]["solutions"] = [solution]
         db[name]["num_solutions"] = 1
-        print(f"[{name}] Found solution: {solution_size}")
+        logger.info(f"[{name}] Found solution: {solution_size}")
     elif solution_size < db[name]["best_solution"]:
         db[name]["best_solution"] = solution_size
         db[name]["solutions"] = [solution]
         db[name]["num_solutions"] = 1
-        print(f"[{name}] Found better solution: {solution_size}")
+        logger.info(f"[{name}] Found better solution: {solution_size}")
     elif db[name]["best_solution"] == solution_size and solution not in db[name]["solutions"]:
         db[name]["solutions"].append(solution)
         db[name]["num_solutions"] += 1
-        print(f"[{name}]\tFound alternate solution: {solution_size}")
+        logger.info(f"[{name}]\tFound alternate solution: {solution_size}")
 
     db.sync()
 
@@ -246,7 +271,7 @@ def find_duplicate_points(planes:list[frozenset[int]]) -> list[bool]:
     return result
 
 
-def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str, origin_vectors:float=0, show_edges=True):
+def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str, origin_vectors:float=0, show_edges=True, label_points=False):
     ax:Axes3D
     fig, ax = plt.subplots(figsize=(4.8, 4.8), subplot_kw={"projection": "3d"})
     ax.set_axis_off()
@@ -260,13 +285,17 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str,
     plane_has_duplicate_points = find_duplicate_points(planes)
 
     # determine point colors
-    covered_points:set[int] = set()
     point_colors:dict[int,int] = {}
-    for i, plane in enumerate(planes):
-        for point_index in plane:
-            if point_index not in covered_points:
-                covered_points.add(point_index)
-                point_colors[point_index] = i
+    if planes:
+        covered_points:set[int] = set()
+        for i, plane in enumerate(planes):
+            for point_index in plane:
+                if point_index not in covered_points:
+                    covered_points.add(point_index)
+                    point_colors[point_index] = i
+    else:
+        for point in mesh.points:
+            point_colors[point.index] = 0
 
     # origin vectors
     for vec, color in (
@@ -281,6 +310,8 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str,
     for i, point in enumerate(mesh.points):
         p = Point(point.coords)
         p.plot_3d(ax, color=colors[point_colors[i] % len(colors)])
+        if label_points:
+            ax.text(point.x, point.y, point.z, i)
 
     # edges
     if show_edges:
@@ -378,7 +409,6 @@ def animation_rotate(i:int, *, ax:Axes3D, total:int):
 
 def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, fname:str, tqdm_position:int=0):
     anim = animation.FuncAnimation(fig, func=functools.partial(anim_func, ax=ax, total=num_frames), frames=num_frames, interval=33)
-    # plt.show()
     writer = animation.FFMpegWriter(fps=30, codec="libvpx-vp9", extra_args=["-crf", "30", "-b:v", "0"])
     os.makedirs("output/animation", exist_ok=True)
     with tqdm(total=num_frames, desc=f"Saving animation {fname}", position=tqdm_position) as progress_bar:
@@ -427,25 +457,35 @@ if __name__ == "__main__":
     list_parser = subparsers.add_parser("list", aliases=["l"], help="list some stuff about meshes in the database")
     list_parser.set_defaults(cmd="list")
 
-    plot_solution_parser = subparsers.add_parser("plot-solution", aliases=["plot", "p"], help="make a 3d plot of a solution")
+    # vvv   Plotting Args   vvv
+
+    plot_parser = argparse.ArgumentParser(add_help=False)
+    plot_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
+    plot_parser.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
+    plot_parser.add_argument("--label-points", "-p", action="store_true", help="show point index numbers")
+
+    single_plot_parser = argparse.ArgumentParser(add_help=False)
+    single_plot_parser.add_argument("name", help="which mesh to show")
+
+    solution_plot_parser = argparse.ArgumentParser(add_help=False)
+    solution_plot_parser.add_argument("--solution", "-s", type=int, default=0, help="solution number")
+
+    plot_mesh_parser = subparsers.add_parser("plot-mesh", aliases=["pm"], help="make a 3d plot of a mesh, without showing solution", parents=[plot_parser, single_plot_parser])
+    plot_mesh_parser.set_defaults(cmd="plot-mesh")
+
+    plot_solution_parser = subparsers.add_parser("plot-solution", aliases=["plot", "p"], help="make a 3d plot of a solution", parents=[plot_parser, single_plot_parser, solution_plot_parser])
     plot_solution_parser.set_defaults(cmd="plot-solution")
-    plot_solution_parser.add_argument("name", help="name of the mesh")
-    plot_solution_parser.add_argument("--solution", "-s", type=int, default=0, help="solution number")
-    plot_solution_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
-    plot_solution_parser.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
 
-    animate_solution_parser = subparsers.add_parser("animate-solution", aliases=["a"], help="animate a solution rotating")
-    animate_solution_parser.set_defaults(cmd="animate-solution")
-    animate_solution_parser.add_argument("--mesh", "-m", dest="name", help="which mesh to show")
-    animate_solution_parser.add_argument("--solution", "-s", type=int, default=0, help="solution number")
-    animate_solution_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
-    animate_solution_parser.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
+    animate_solution_parser = subparsers.add_parser("animate-solution", aliases=["a"], help="animate a solution rotating", parents=[plot_parser, single_plot_parser, solution_plot_parser])
+    animate_solution_parser.set_defaults(cmd="animate-solution", label_points=False)
 
-    save_plots_parser = subparsers.add_parser("save-plots", aliases=["sp"], help="save plot images")
+    save_plots_parser = subparsers.add_parser("save-plots", aliases=["sp"], help="save plot images", parents=[plot_parser])
     save_plots_parser.set_defaults(cmd="save-plots")
 
-    save_all_plots_parser = subparsers.add_parser("save-all-plots", aliases=["sap"], help="save plot images for every solution in the database")
+    save_all_plots_parser = subparsers.add_parser("save-all-plots", aliases=["sap"], help="save plot images for every solution in the database", parents=[plot_parser])
     save_all_plots_parser.set_defaults(cmd="save-all-plots")
+
+    # ^^^   Plotting Args   ^^^
 
     args = parser.parse_args()
 
@@ -476,13 +516,16 @@ if __name__ == "__main__":
         elif args.cmd == "list":
             list_database(db)
 
-        elif args.cmd in ("plot-solution", "animate-solution"):
+        elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
             row = db[args.name]
             mesh = row["mesh"]
-            solution = row["solutions"][args.solution]
+            if args.cmd == "plot-mesh":
+                solution = frozenset()
+            else:
+                solution = row["solutions"][args.solution]
             title = f'{row["fullname"]} (J{args.name[1:]})'
-            fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges)
-            if args.cmd == "plot-solution":
+            fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
+            if args.cmd in ("plot-mesh", "plot-solution"):
                 plt.show()
             elif args.cmd == "animate-solution":
                 animate_solution(fig, ax, animation_rotate, 120, args.name)
@@ -493,7 +536,7 @@ if __name__ == "__main__":
                 mesh = row["mesh"]
                 solution = row["solutions"][0]
                 title = f'{row["fullname"]} ({name})'
-                fig, ax = plot_solution(mesh, solution, title)
+                fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
                 os.makedirs("output/plots", exist_ok=True)
                 fig.savefig(f"output/plots/{name}.png")
                 plt.close(fig)
@@ -505,6 +548,10 @@ if __name__ == "__main__":
                 title = f'{row["fullname"]} ({name})'
                 os.makedirs(f"output/plots/{name}", exist_ok=True)
                 for i, solution in enumerate(tqdm(row["solutions"], f"Saving {name}", position=1, leave=False)):
-                    fig, ax = plot_solution(mesh, solution, title)
+                    fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
                     fig.savefig(f"output/plots/{name}/{name}_{i}.png")
                     plt.close(fig)
+
+        for h in logger.handlers:
+            h.flush()
+            h.close()

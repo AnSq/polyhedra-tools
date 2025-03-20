@@ -6,9 +6,10 @@ __pycache__/
 *.csv
 mcp1.py
 names.py
-database.db*
+*.db*
 *.png
 *.mp4
 *.html
 *.gif
 *.webm
+*.log
