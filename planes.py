@@ -191,7 +191,7 @@ def find_upper_bound(mesh:off.Mesh, name:str=None, print_=False) -> tuple[int,st
 
 
 def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[frozenset[int]],float]:
-    logger.info(f"calculating minimum covering planes of {name}")
+    # logger.debug(f"calculating minimum covering planes of {name}")
     mesh:off.Mesh = db[name]["mesh"]
     planes_list:list[frozenset[int]] = list(db[name]["planes"])
     plane_sort_key = lambda x: (len(x), sorted(x))
@@ -202,13 +202,13 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
         for j in planes_list[i]:
             matrix[i,j] = 1
 
-    sc = setcover.SetCover(matrix.T, cost=np.ones((len(planes_list),), dtype=np.byte))
+    sc = setcover.SetCover(matrix.T, cost=np.ones((len(planes_list),), dtype=np.byte), maxiters=1)
     solution_size, minutes = sc.SolveSCP()
     solution_size = int(solution_size)
 
-    ub, reason = find_upper_bound(mesh)
-    if solution_size > ub:
-        logger.warning(f"[{name}] found solution {solution_size} is worse than upper bound {ub} ({reason})")
+    # ub, reason = find_upper_bound(mesh)
+    # if solution_size > ub:
+    #     logger.warning(f"[{name}] found solution {solution_size} is worse than upper bound {ub} ({reason})")
 
     solution_set_indexes = [int(i) for i in range(len(sc.s)) if sc.s[i]]
     solution = frozenset(planes_list[i] for i in solution_set_indexes)
@@ -234,7 +234,7 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
 
 
 def all_minimum_covering_planes(db:shelve.Shelf, range_:Sequence[int]=None) -> None:
-    for name in db:
+    for name in tqdm(db, desc="Finding all minimum covering planes", leave=False):
         if range_ is None or (range_[0] <= db[name]["best_solution"] <= range_[1]):
             minimum_covering_planes(db, name)
 
@@ -449,6 +449,7 @@ if __name__ == "__main__":
     all_minimum_covering_planes_parser = subparsers.add_parser("all-minimum-covering-planes", aliases=["amcp"], help="find the minimum covering planes of all meshes")
     all_minimum_covering_planes_parser.set_defaults(cmd="all-minimum-covering-planes")
     all_minimum_covering_planes_parser.add_argument("--solution-range", "-r", nargs=2, type=int, metavar=("MIN", "MAX"), help="only recalculate solutions in the given range")
+    all_minimum_covering_planes_parser.add_argument("--loop", "-l", action="store_true", help="loop forever (ctrl-C to exit)")
 
     show_solutions_parser = subparsers.add_parser("show-solutions", aliases=["show", "solutions", "s"], help="show or save the calculated solutions")
     show_solutions_parser.set_defaults(cmd="show-solutions")
@@ -505,7 +506,20 @@ if __name__ == "__main__":
                 print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
 
         elif args.cmd == "all-minimum-covering-planes":
-            all_minimum_covering_planes(db, args.solution_range)
+            if args.loop:
+                stream_handler.setLevel(logging.ERROR)
+            try:
+                n_loops = 0
+                with tqdm(desc="Loops", unit="", position=1) as status_bar:
+                    while True:
+                        all_minimum_covering_planes(db, args.solution_range)
+                        n_loops += 1
+                        status_bar.update(1)
+                        if not args.loop:
+                            break
+                        file_handler.flush()
+            except KeyboardInterrupt:
+                print(f"\nexiting after {n_loops} loops")
 
         elif args.cmd == "show-solutions":
             if args.output is not None:
@@ -552,6 +566,9 @@ if __name__ == "__main__":
                     fig.savefig(f"output/plots/{name}/{name}_{i}.png")
                     plt.close(fig)
 
-        for h in logger.handlers:
-            h.flush()
-            h.close()
+        db.sync()
+        db.close()
+
+    for h in logger.handlers:
+        h.flush()
+        h.close()
