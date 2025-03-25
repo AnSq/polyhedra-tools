@@ -4,8 +4,9 @@ from typing import Any, TypeVar, TYPE_CHECKING
 import warnings
 import logging
 import itertools
+from math import sqrt, log10
 
-import skspatial.objects
+from skspatial.objects import Points as sksoPoints  #todo: remove this as a dependancy
 
 if TYPE_CHECKING:
     import _typeshed
@@ -105,6 +106,13 @@ class Edge:
             return False
 
 
+    @property
+    def length(self) -> float:
+        p0 = self.p0
+        p1 = self.p1
+        return sqrt((p1.x - p0.x)**2 + (p1.y - p0.y)**2 + (p1.z - p0.z)**2)
+
+
 
 class Face:
     def __init__(self, index:int, points:list[Vertex]) -> None:
@@ -137,7 +145,7 @@ class Face:
 
 
     def check_coplanar(self, tol=TOLERANCE):
-        result = skspatial.objects.Points(self.points_array()).are_coplanar(tol=tol)
+        result = sksoPoints(self.points_array()).are_coplanar(tol=tol)
         if not result:
             print(f"face {self} is not coplanar")
         return result
@@ -326,7 +334,16 @@ class Mesh:
         return result
 
 
-    def all_checks(self) -> bool:
+    def check_unit_edges(self, round_digits=int(-log10(TOLERANCE))) -> bool:
+        """check that all edges have a length of 1"""
+        lengths = set(round(e.length, round_digits) for e in self.edges)
+        if lengths != {1}:
+            logger.error(f"edge lengths: {sorted(list(lengths))}")
+            return False
+        return True
+
+
+    def all_checks(self, include_unit_edges=False) -> bool:
         print("Checking mesh")
         ndp = self.check_no_duplicate_points()
         nup = self.check_no_unused_points()
@@ -345,12 +362,19 @@ class Mesh:
         print(f"Coplanar faces:       {passfail(cpf)}")
         print(f"Incorrect edge count: {passfail(iec)}")
         print(f"Unfinished file read: {passfail(ufr)}")
-        return all((ndp, nup, nde, ccp, cce, cpf, iec, ufr))
+
+        uel = True
+        if include_unit_edges:
+            uel = self.check_unit_edges()
+            print(f"Unit edge lengths:    {passfail(uel)}")
+
+        return all((ndp, nup, nde, ccp, cce, cpf, iec, ufr, uel))
 
 
 if __name__ == "__main__":
     import sys, os
     f = sys.argv[1]
+    include_unit_edges = len(sys.argv) > 2 and sys.argv[2] == "-e"
     result = True
     if os.path.isdir(f):
         for fname in os.listdir(f):
@@ -358,10 +382,10 @@ if __name__ == "__main__":
             if fullname.endswith(".off") and os.path.isfile(fullname):
                 print(f"\n{fname}")
                 mesh = Mesh.load(fullname)
-                result = all((mesh.all_checks(), result))
+                result = all((mesh.all_checks(include_unit_edges), result))
     elif os.path.isfile(f):
         mesh = Mesh.load(f)
-        result = mesh.all_checks()
+        result = mesh.all_checks(include_unit_edges)
     else:
         print(f"Invalid input: {f}")
         result = False
