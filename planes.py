@@ -135,7 +135,7 @@ def find_planes(mesh:off.Mesh, name:str=None) -> PlaneSet:
     # find non-face planes
     start_time = time.time()
     point_nums = set(range(mesh.num_points))
-    for combo in (set(c) for c in itertools.combinations(point_nums, 3)):
+    for combo in tqdm((set(c) for c in itertools.combinations(point_nums, 3)), desc=f"Finding planes for {name}", leave=False, position=1, total=math.comb(len(point_nums), 3)):
         if any(combo <= p for p in planes):
             continue # already have this combo
 
@@ -155,14 +155,19 @@ def find_planes(mesh:off.Mesh, name:str=None) -> PlaneSet:
 
 
 def find_all_planes(db:shelve.Shelf, overwrite=False) -> None:
-    """find planes for all meshes in db. If a mesh already has planes, they will be recalculated and overwritten if overwrite=False, otherwise the mesh will be skipped"""
+    """find planes for all meshes in db. If a mesh already has planes, they will be recalculated and overwritten if overwrite=True, otherwise the mesh will be skipped"""
+    names = []
     for name in db:
         if overwrite or ("planes" not in db[name]) or (not db[name]["planes"]):
-            try:
-                db[name]["planes"] = find_planes(db[name]["mesh"], name)
-                db.sync()
-            except ValueError as e:
-                logger.error(e)
+            names.append(name)
+
+    for name in (progress_bar := tqdm(names, desc="Finding all planes")):
+        progress_bar.set_postfix({"current": name})
+        try:
+            db[name]["planes"] = find_planes(db[name]["mesh"], name)
+            db.sync()
+        except ValueError as e:
+            logger.error(e)
 
 
 def find_upper_bound(mesh:off.Mesh, name:str=None, print_=False) -> tuple[int,str]:
@@ -234,9 +239,13 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
 
 
 def all_minimum_covering_planes(db:shelve.Shelf, range_:Sequence[int]=None) -> None:
-    for name in tqdm(db, desc="Finding all minimum covering planes", leave=False):
+    names = []
+    for name in db:
         if range_ is None or (range_[0] <= db[name]["best_solution"] <= range_[1]):
-            minimum_covering_planes(db, name)
+            names.append(name)
+    for name in (progress_bar := tqdm(names, desc="Finding all minimum covering planes", leave=False)):
+        progress_bar.set_postfix({"current": name})
+        minimum_covering_planes(db, name)
 
 
 def str_solutions(db:shelve.Shelf, sep="\t") -> str:
@@ -491,80 +500,84 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with open_db() as db:
-        if args.cmd == "load-mesh":
-            load_mesh(db, args.meshfile, args.clear)
+        try:
+            if args.cmd == "load-mesh":
+                load_mesh(db, args.meshfile, args.clear)
 
-        elif args.cmd == "load-mesh-dir":
-            load_meshes(db, args.dir, args.clear)
+            elif args.cmd == "load-mesh-dir":
+                load_meshes(db, args.dir, args.clear)
 
-        elif args.cmd == "find-planes":
-            find_all_planes(db, args.overwrite)
+            elif args.cmd == "find-planes":
+                find_all_planes(db, args.overwrite)
 
-        elif args.cmd == "minimum-covering-planes":
-            solution_size, solution, t_seconds = minimum_covering_planes(db, args.name)
-            if not args.quiet:
-                print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
+            elif args.cmd == "minimum-covering-planes":
+                solution_size, solution, t_seconds = minimum_covering_planes(db, args.name)
+                if not args.quiet:
+                    print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
 
-        elif args.cmd == "all-minimum-covering-planes":
-            if args.loop:
-                stream_handler.setLevel(logging.ERROR)
-            try:
-                n_loops = 0
-                with tqdm(desc="Loops", unit="", position=1) as status_bar:
-                    while True:
-                        all_minimum_covering_planes(db, args.solution_range)
-                        n_loops += 1
-                        status_bar.update(1)
-                        if not args.loop:
-                            break
-                        file_handler.flush()
-            except KeyboardInterrupt:
-                print(f"\nexiting after {n_loops} loops")
+            elif args.cmd == "all-minimum-covering-planes":
+                if args.loop:
+                    stream_handler.setLevel(logging.ERROR)
+                try:
+                    n_loops = 0
+                    with tqdm(desc="Loops", unit="", position=1) as status_bar:
+                        while True:
+                            all_minimum_covering_planes(db, args.solution_range)
+                            n_loops += 1
+                            status_bar.update(1)
+                            if not args.loop:
+                                break
+                            file_handler.flush()
+                except KeyboardInterrupt:
+                    print(f"\nexiting after {n_loops} loops")
 
-        elif args.cmd == "show-solutions":
-            if args.output is not None:
-                save_solutions_csv(db, args.output)
-            else:
-                print_solutions(db)
+            elif args.cmd == "show-solutions":
+                if args.output is not None:
+                    save_solutions_csv(db, args.output)
+                else:
+                    print_solutions(db)
 
-        elif args.cmd == "list":
-            list_database(db)
+            elif args.cmd == "list":
+                list_database(db)
 
-        elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
-            row = db[args.name]
-            mesh = row["mesh"]
-            if args.cmd == "plot-mesh":
-                solution = frozenset()
-            else:
-                solution = row["solutions"][args.solution]
-            title = f'{row["fullname"]} (J{args.name[1:]})'
-            fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
-            if args.cmd in ("plot-mesh", "plot-solution"):
-                plt.show()
-            elif args.cmd == "animate-solution":
-                animate_solution(fig, ax, animation_rotate, 120, args.name)
-
-        elif args.cmd == "save-plots":
-            for name in tqdm(db, "Saving plots"):
-                row = db[name]
+            elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
+                row = db[args.name]
                 mesh = row["mesh"]
-                solution = row["solutions"][0]
-                title = f'{row["fullname"]} ({name})'
+                if args.cmd == "plot-mesh":
+                    solution = frozenset()
+                else:
+                    solution = row["solutions"][args.solution]
+                title = f'{row["fullname"]} (J{args.name[1:]})'
                 fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
-                os.makedirs("output/plots", exist_ok=True)
-                fig.savefig(f"output/plots/{name}.png")
-                plt.close(fig)
+                if args.cmd in ("plot-mesh", "plot-solution"):
+                    plt.show()
+                elif args.cmd == "animate-solution":
+                    animate_solution(fig, ax, animation_rotate, 120, args.name)
 
-        elif args.cmd == "save-all-plots":
-            for name in tqdm(db, "Saving all plots", position=0):
-                row = db[name]
-                mesh = row["mesh"]
-                title = f'{row["fullname"]} ({name})'
-                os.makedirs(f"output/plots/{name}", exist_ok=True)
-                for i, solution in enumerate(tqdm(row["solutions"], f"Saving {name}", position=1, leave=False)):
+            elif args.cmd == "save-plots":
+                for name in tqdm(db, "Saving plots"):
+                    row = db[name]
+                    mesh = row["mesh"]
+                    solution = row["solutions"][0]
+                    title = f'{row["fullname"]} ({name})'
                     fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
-                    fig.savefig(f"output/plots/{name}/{name}_{i}.png")
+                    os.makedirs("output/plots", exist_ok=True)
+                    fig.savefig(f"output/plots/{name}.png")
                     plt.close(fig)
+
+            elif args.cmd == "save-all-plots":
+                for name in tqdm(db, "Saving all plots", position=0):
+                    row = db[name]
+                    mesh = row["mesh"]
+                    title = f'{row["fullname"]} ({name})'
+                    os.makedirs(f"output/plots/{name}", exist_ok=True)
+                    for i, solution in enumerate(tqdm(row["solutions"], f"Saving {name}", position=1, leave=False)):
+                        fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
+                        fig.savefig(f"output/plots/{name}/{name}_{i}.png")
+                        plt.close(fig)
+
+        except KeyboardInterrupt:
+            print("KeyboardInterrupt")
 
         db.sync()
         db.close()
