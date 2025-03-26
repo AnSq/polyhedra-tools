@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 import os
-import sys
+import re
 import time
 import itertools
 import math
@@ -47,6 +47,28 @@ setcover.np.seterr(divide="ignore", invalid="ignore")
 
 TOLERANCE = 1e-12
 DB_FILE = "database.db"
+
+
+
+class Filter:
+    """controls which meshes are processed in an operation"""
+
+    def __init__(self, name_re:str=None, solution_range:Sequence[int]=None) -> None:
+        self.name_re = re.compile(name_re) if (name_re is not None) else None
+        self.solution_range = solution_range
+
+    def __repr__(self) -> str:
+        return f"Filter({repr(None if not self.name_re else self.name_re.pattern)}, {self.solution_range})"
+
+    def __call__(self, db:shelve.Shelf) -> list[str]:
+        """return a list of db keys (names) that pass the filter"""
+        result = []
+        for name in db:
+            if (self.name_re is None or self.name_re.search(name)) \
+            and (self.solution_range is None or (self.solution_range[0] <= (db[name]["best_solution"] or 0) <= self.solution_range[1])):
+                result.append(name)
+        return result
+
 
 
 def open_db(fname=DB_FILE) -> shelve.Shelf:
@@ -154,10 +176,12 @@ def find_planes(mesh:off.Mesh, name:str=None) -> PlaneSet:
     return planes
 
 
-def find_all_planes(db:shelve.Shelf, overwrite=False) -> None:
-    """find planes for all meshes in db. If a mesh already has planes, they will be recalculated and overwritten if overwrite=True, otherwise the mesh will be skipped"""
+def find_all_planes(db:shelve.Shelf, db_filter:Filter, overwrite=False) -> int:
+    """find planes for all meshes in db. If a mesh already has planes, they will be recalculated and overwritten if overwrite=True, otherwise the mesh will be skipped.
+    Returns the number of meshes that were processed"""
+    filter_matches = db_filter(db)
     names = []
-    for name in db:
+    for name in filter_matches:
         if overwrite or ("planes" not in db[name]) or (not db[name]["planes"]):
             names.append(name)
 
@@ -168,6 +192,8 @@ def find_all_planes(db:shelve.Shelf, overwrite=False) -> None:
             db.sync()
         except ValueError as e:
             logger.error(e)
+
+    return len(names)
 
 
 def find_upper_bound(mesh:off.Mesh, name:str=None, print_=False) -> tuple[int,str]:
@@ -209,11 +235,12 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
 
     sc = setcover.SetCover(matrix.T, cost=np.ones((len(planes_list),), dtype=np.byte), maxiters=1)
     solution_size, minutes = sc.SolveSCP()
+    seconds = minutes * 60
     solution_size = int(solution_size)
 
-    # ub, reason = find_upper_bound(mesh)
-    # if solution_size > ub:
-    #     logger.warning(f"[{name}] found solution {solution_size} is worse than upper bound {ub} ({reason})")
+    oversize_warning = ""
+    if solution_size > db[name]["upper_bound"]:
+        oversize_warning = f' (worse than known upper bound {db[name]["upper_bound"]})'
 
     solution_set_indexes = [int(i) for i in range(len(sc.s)) if sc.s[i]]
     solution = frozenset(planes_list[i] for i in solution_set_indexes)
@@ -222,35 +249,34 @@ def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[fr
         db[name]["best_solution"] = solution_size
         db[name]["solutions"] = [solution]
         db[name]["num_solutions"] = 1
-        logger.info(f"[{name}] Found solution: {solution_size}")
+        logger.info(f"[{name}] Found solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
     elif solution_size < db[name]["best_solution"]:
         db[name]["best_solution"] = solution_size
         db[name]["solutions"] = [solution]
         db[name]["num_solutions"] = 1
-        logger.info(f"[{name}] Found better solution: {solution_size}")
+        logger.info(f"[{name}] Found better solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
     elif db[name]["best_solution"] == solution_size and solution not in db[name]["solutions"]:
         db[name]["solutions"].append(solution)
         db[name]["num_solutions"] += 1
-        logger.info(f"[{name}]\tFound alternate solution: {solution_size}")
+        logger.info(f"[{name}]\tFound alternate solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
 
     db.sync()
 
-    return (solution_size, solution, minutes*60)
+    return (solution_size, solution, seconds)
 
 
-def all_minimum_covering_planes(db:shelve.Shelf, range_:Sequence[int]=None) -> None:
-    names = []
-    for name in db:
-        if range_ is None or (range_[0] <= db[name]["best_solution"] <= range_[1]):
-            names.append(name)
-    for name in (progress_bar := tqdm(names, desc="Finding all minimum covering planes", leave=False)):
+def all_minimum_covering_planes(db:shelve.Shelf, db_filter:Filter) -> int:
+    """calculate minimum covering planes for all meshes that pass the filter. Return how many were processed"""
+    matches = db_filter(db)
+    for name in (progress_bar := tqdm(matches, desc="Finding all minimum covering planes", leave=False)):
         progress_bar.set_postfix({"current": name})
         minimum_covering_planes(db, name)
+    return len(matches)
 
 
-def str_solutions(db:shelve.Shelf, sep="\t") -> str:
+def str_solutions(db:shelve.Shelf, sep="\t", db_filter:Filter=Filter()) -> str:
     result = sep.join(("name","best_solution","num_solutions","upper_bound","ub_reason")) + "\n"
-    for name in db:
+    for name in db_filter(db):
         result += sep.join(str(i) for i in (
             name,
             db[name]["best_solution"],
@@ -261,13 +287,13 @@ def str_solutions(db:shelve.Shelf, sep="\t") -> str:
     return result
 
 
-def print_solutions(db:shelve.Shelf) -> None:
-    print(str_solutions(db, "\t"))
+def print_solutions(db:shelve.Shelf, db_filter:Filter=Filter()) -> None:
+    print(str_solutions(db, "\t", db_filter))
 
 
-def save_solutions_csv(db:shelve.Shelf, outfile:str):
+def save_solutions_csv(db:shelve.Shelf, outfile:str, db_filter:Filter=Filter()):
     with open(outfile, "w") as f:
-        f.write(str_solutions(db, ","))
+        f.write(str_solutions(db, ",", db_filter))
 
 
 def find_duplicate_points(planes:list[frozenset[int]]) -> list[bool]:
@@ -424,9 +450,9 @@ def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, 
         anim.save(f"output/animation/{fname}.webm", writer, progress_callback=lambda c,t: progress_bar.update(1))
 
 
-def list_database(db:shelve.Shelf) -> None:
+def list_database(db:shelve.Shelf, db_filter:Filter=Filter()) -> None:
     print("name\tvertices\tedges\tfaces\tbest_solution\tnum_solutions\tupper_bound\tub_reason\tnum_planes\tfullname")
-    for name in db:
+    for name in db_filter(db):
         mesh:off.Mesh = db[name]["mesh"]
         row = db[name]
         print(f'{name}\t{mesh.num_points}\t{mesh.num_edges}\t{mesh.num_faces}\t{row["best_solution"]}\t{row["num_solutions"]}\t{row["upper_bound"]}\t{row["ub_reason"]}\t{len(row["planes"])}\t{row["fullname"]}')
@@ -435,6 +461,15 @@ def list_database(db:shelve.Shelf) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(title="commands", required=True)
+
+    loopable_parser = argparse.ArgumentParser(add_help=False)
+    loopable_parser.add_argument("--loop", "-l", action="store_true", help="loop forever (ctrl-C to exit)")
+
+    filterable_parser = argparse.ArgumentParser(add_help=False)
+    filterable_parser.set_defaults(filterable=True)
+    filterable_parser_group = filterable_parser.add_argument_group("Filter options")
+    filterable_parser_group.add_argument("--solution-range", "-r", nargs=2, type=int, metavar=("MIN", "MAX"), help="only process meshes with solutions in the given range")
+    filterable_parser_group.add_argument("--name-re", "-n", help="only process meshes with names matching the given regex")
 
     load_mesh_parser = subparsers.add_parser("load-mesh", aliases=["lm"], help="load a mesh file")
     load_mesh_parser.set_defaults(cmd="load-mesh")
@@ -446,25 +481,24 @@ if __name__ == "__main__":
     load_meshes_parser.add_argument("dir", help="directory to search for .off files to load")
     load_meshes_parser.add_argument("--clear", action="store_true", help="if a mesh already exists in the db, delete the entire db entry (planes, solutions, etc) for the mesh before reloading it")
 
-    find_planes_parser = subparsers.add_parser("find-planes", aliases=["fp"], help="find all sets of coplanar vertices for loaded meshes")
+    find_planes_parser = subparsers.add_parser("find-planes", aliases=["fp"], help="find all sets of coplanar vertices for loaded meshes", parents=[filterable_parser])
     find_planes_parser.set_defaults(cmd="find-planes")
     find_planes_parser.add_argument("--overwrite", action="store_true", help="recalculate and overwrite planes (otherwise meshes with planes already will be skipped)")
 
-    minimum_covering_planes_parser = subparsers.add_parser("minimum-covering-planes", aliases=["mcp"], help="find the minimum covering planes of the given mesh")
+    minimum_covering_planes_parser = subparsers.add_parser("minimum-covering-planes", aliases=["mcp"], help="find the minimum covering planes of the given mesh", parents=[loopable_parser])
     minimum_covering_planes_parser.set_defaults(cmd="minimum-covering-planes")
     minimum_covering_planes_parser.add_argument("name", help="name of the mesh")
     minimum_covering_planes_parser.add_argument("--quiet", "-q", action="store_true", help="don't print full solution. Only print when there's a new solution")
 
-    all_minimum_covering_planes_parser = subparsers.add_parser("all-minimum-covering-planes", aliases=["amcp"], help="find the minimum covering planes of all meshes")
+    all_minimum_covering_planes_parser = subparsers.add_parser("all-minimum-covering-planes", aliases=["amcp"], help="find the minimum covering planes of all meshes", parents=[loopable_parser, filterable_parser])
     all_minimum_covering_planes_parser.set_defaults(cmd="all-minimum-covering-planes")
-    all_minimum_covering_planes_parser.add_argument("--solution-range", "-r", nargs=2, type=int, metavar=("MIN", "MAX"), help="only recalculate solutions in the given range")
-    all_minimum_covering_planes_parser.add_argument("--loop", "-l", action="store_true", help="loop forever (ctrl-C to exit)")
+    # all_minimum_covering_planes_parser.add_argument("--solution-range", "-r", nargs=2, type=int, metavar=("MIN", "MAX"), help="only recalculate solutions in the given range")
 
-    show_solutions_parser = subparsers.add_parser("show-solutions", aliases=["show", "solutions", "s"], help="show or save the calculated solutions")
+    show_solutions_parser = subparsers.add_parser("show-solutions", aliases=["show", "solutions", "s"], help="show or save the calculated solutions", parents=[filterable_parser])
     show_solutions_parser.set_defaults(cmd="show-solutions")
     show_solutions_parser.add_argument("--output", "-o", help=".csv file to save to instead of printing")
 
-    list_parser = subparsers.add_parser("list", aliases=["l"], help="list some stuff about meshes in the database")
+    list_parser = subparsers.add_parser("list", aliases=["l"], help="list some stuff about meshes in the database", parents=[filterable_parser])
     list_parser.set_defaults(cmd="list")
 
     # vvv   Plotting Args   vvv
@@ -497,7 +531,12 @@ if __name__ == "__main__":
 
     # ^^^   Plotting Args   ^^^
 
+    test_filter_parser = subparsers.add_parser("test-filter", aliases=["tf"], help="list which meshes pass the given filter", parents=[filterable_parser])
+    test_filter_parser.set_defaults(cmd="test-filter")
+
     args = parser.parse_args()
+    if getattr(args, "filterable", False):
+        db_filter = Filter(args.name_re, args.solution_range)
 
     with open_db() as db:
         try:
@@ -508,12 +547,26 @@ if __name__ == "__main__":
                 load_meshes(db, args.dir, args.clear)
 
             elif args.cmd == "find-planes":
-                find_all_planes(db, args.overwrite)
+                find_all_planes(db, db_filter, args.overwrite)
 
             elif args.cmd == "minimum-covering-planes":
-                solution_size, solution, t_seconds = minimum_covering_planes(db, args.name)
-                if not args.quiet:
-                    print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
+                if args.loop:
+                    stream_handler.setLevel(logging.ERROR)
+                try:
+                    n_loops = 0
+                    with tqdm(desc="Loops", unit="") as status_bar:
+                        while True:
+                            solution_size, solution, t_seconds = minimum_covering_planes(db, args.name)
+                            if not args.quiet:
+                                print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
+                            n_loops += 1
+                            status_bar.update(1)
+                            if not args.loop:
+                                break
+                            file_handler.flush()
+                except KeyboardInterrupt:
+
+                    print(f"\nexiting after {n_loops} loops")
 
             elif args.cmd == "all-minimum-covering-planes":
                 if args.loop:
@@ -522,7 +575,9 @@ if __name__ == "__main__":
                     n_loops = 0
                     with tqdm(desc="Loops", unit="", position=1) as status_bar:
                         while True:
-                            all_minimum_covering_planes(db, args.solution_range)
+                            num_processed = all_minimum_covering_planes(db, db_filter)
+                            if not num_processed:
+                                break
                             n_loops += 1
                             status_bar.update(1)
                             if not args.loop:
@@ -533,12 +588,12 @@ if __name__ == "__main__":
 
             elif args.cmd == "show-solutions":
                 if args.output is not None:
-                    save_solutions_csv(db, args.output)
+                    save_solutions_csv(db, args.output, db_filter)
                 else:
-                    print_solutions(db)
+                    print_solutions(db, db_filter)
 
             elif args.cmd == "list":
-                list_database(db)
+                list_database(db, db_filter)
 
             elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
                 row = db[args.name]
@@ -547,7 +602,7 @@ if __name__ == "__main__":
                     solution = frozenset()
                 else:
                     solution = row["solutions"][args.solution]
-                title = f'{row["fullname"]} (J{args.name[1:]})'
+                title = f'{row["fullname"]} ({args.name})'
                 fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
                 if args.cmd in ("plot-mesh", "plot-solution"):
                     plt.show()
@@ -575,6 +630,13 @@ if __name__ == "__main__":
                         fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
                         fig.savefig(f"output/plots/{name}/{name}_{i}.png")
                         plt.close(fig)
+
+            elif args.cmd == "test-filter":
+                print(db_filter)
+                matches = db_filter(db)
+                for name in matches:
+                    print(f'{name}\t\t({db[name]["best_solution"]})')
+                print(f"({len(matches)} matches)")
 
         except KeyboardInterrupt:
             print("KeyboardInterrupt")
