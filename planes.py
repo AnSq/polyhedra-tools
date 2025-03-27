@@ -27,6 +27,7 @@ import matplotlib.patches
 import matplotlib.lines
 import matplotlib.legend_handler
 
+from tabulate import tabulate
 from tqdm import tqdm  #type: ignore
 
 import off
@@ -75,7 +76,7 @@ def open_db(fname=DB_FILE) -> shelve.Shelf:
     return shelve.open(fname, writeback=True)
 
 
-def load_mesh(db:shelve.Shelf, fname:str, clear=False) -> tuple[str,off.Mesh]:
+def load_mesh(db:shelve.Shelf, fname:str, clear=False) -> tuple[str,off.Mesh] | tuple[None,None]:
     """load the given mesh file into the db. Deletes the entire db entry (planes, solutions, etc) for the mesh first if clear=True"""
     name, fullname = os.path.basename(fname).split(".")[0].split("_", 1)
     fullname = fullname.replace("_", " ")
@@ -106,7 +107,7 @@ def load_mesh(db:shelve.Shelf, fname:str, clear=False) -> tuple[str,off.Mesh]:
             "upper_bound"   : ub,
             "ub_reason"     : reason,
             "best_solution" : None,
-            "num_solutions" :  0,
+            "num_solutions" : 0,
             "solutions"     : [],
             "planes"        : []
         }
@@ -221,12 +222,15 @@ def find_upper_bound(mesh:off.Mesh, name:str=None, print_=False) -> tuple[int,st
     return (ub, reason.strip())
 
 
-def minimum_covering_planes(db:shelve.Shelf, name:str) -> tuple[int,frozenset[frozenset[int]],float]:
+def minimum_covering_planes(db:shelve.Shelf, name:str, exclude_3s=False) -> tuple[int,frozenset[frozenset[int]],float]:
     # logger.debug(f"calculating minimum covering planes of {name}")
     mesh:off.Mesh = db[name]["mesh"]
     planes_list:list[frozenset[int]] = list(db[name]["planes"])
     plane_sort_key = lambda x: (len(x), sorted(x))
     planes_list.sort(key=plane_sort_key, reverse=True)
+
+    if exclude_3s:
+        planes_list = [p for p in planes_list if len(p) > 3]
 
     matrix = np.zeros((len(planes_list), mesh.num_points), dtype=np.byte)
     for i in range(len(planes_list)):
@@ -272,28 +276,6 @@ def all_minimum_covering_planes(db:shelve.Shelf, db_filter:Filter) -> int:
         progress_bar.set_postfix({"current": name})
         minimum_covering_planes(db, name)
     return len(matches)
-
-
-def str_solutions(db:shelve.Shelf, sep="\t", db_filter:Filter=Filter()) -> str:
-    result = sep.join(("name","best_solution","num_solutions","upper_bound","ub_reason")) + "\n"
-    for name in db_filter(db):
-        result += sep.join(str(i) for i in (
-            name,
-            db[name]["best_solution"],
-            db[name]["num_solutions"],
-            db[name]["upper_bound"],
-            db[name]["ub_reason"]
-        )) + "\n"
-    return result
-
-
-def print_solutions(db:shelve.Shelf, db_filter:Filter=Filter()) -> None:
-    print(str_solutions(db, "\t", db_filter))
-
-
-def save_solutions_csv(db:shelve.Shelf, outfile:str, db_filter:Filter=Filter()):
-    with open(outfile, "w") as f:
-        f.write(str_solutions(db, ",", db_filter))
 
 
 def find_duplicate_points(planes:list[frozenset[int]]) -> list[bool]:
@@ -450,12 +432,36 @@ def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, 
         anim.save(f"output/animation/{fname}.webm", writer, progress_callback=lambda c,t: progress_bar.update(1))
 
 
-def list_database(db:shelve.Shelf, db_filter:Filter=Filter()) -> None:
-    print("name\tvertices\tedges\tfaces\tbest_solution\tnum_solutions\tupper_bound\tub_reason\tnum_planes\tfullname")
+TABLE_COLUMN_DEFS = {
+    "n": ("Name",           lambda r: r["name"]),
+    "N": ("Full Name",      lambda r: r["fullname"]),
+    "v": ("Vertices",       lambda r: r["mesh"].num_points),
+    "e": ("Edges",          lambda r: r["mesh"].num_edges),
+    "f": ("Faces",          lambda r: r["mesh"].num_faces),
+    "s": ("Best Solution",  lambda r: r["best_solution"]),
+    "S": ("Num. Solutions", lambda r: r["num_solutions"]),
+    "u": ("Upper Bound",    lambda r: r["upper_bound"]),
+    "U": ("U.B. Reason",    lambda r: r["ub_reason"]),
+    "p": ("Total Planes",   lambda r: len(r["planes"])),
+}
+ALL_COLUMNS = "nvefsSuUpN"
+
+def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMNS) -> None:
+    if columns == "a":
+        columns = ALL_COLUMNS
+
+    headers = []
+    for c in columns:
+            headers.append(TABLE_COLUMN_DEFS[c][0])
+
+    table = []
     for name in db_filter(db):
-        mesh:off.Mesh = db[name]["mesh"]
-        row = db[name]
-        print(f'{name}\t{mesh.num_points}\t{mesh.num_edges}\t{mesh.num_faces}\t{row["best_solution"]}\t{row["num_solutions"]}\t{row["upper_bound"]}\t{row["ub_reason"]}\t{len(row["planes"])}\t{row["fullname"]}')
+        table_row = []
+        for c in columns:
+            table_row.append(TABLE_COLUMN_DEFS[c][1](db[name]))
+        table.append(table_row)
+
+    print(tabulate(table, headers=headers))
 
 
 if __name__ == "__main__":
@@ -489,17 +495,25 @@ if __name__ == "__main__":
     minimum_covering_planes_parser.set_defaults(cmd="minimum-covering-planes")
     minimum_covering_planes_parser.add_argument("name", help="name of the mesh")
     minimum_covering_planes_parser.add_argument("--quiet", "-q", action="store_true", help="don't print full solution. Only print when there's a new solution")
+    minimum_covering_planes_parser.add_argument("--exclude-3s", "-3", action="store_true", help="don't consider 3-point planes when finding a solution")
 
     all_minimum_covering_planes_parser = subparsers.add_parser("all-minimum-covering-planes", aliases=["amcp"], help="find the minimum covering planes of all meshes", parents=[loopable_parser, filterable_parser])
     all_minimum_covering_planes_parser.set_defaults(cmd="all-minimum-covering-planes")
-    # all_minimum_covering_planes_parser.add_argument("--solution-range", "-r", nargs=2, type=int, metavar=("MIN", "MAX"), help="only recalculate solutions in the given range")
 
     show_solutions_parser = subparsers.add_parser("show-solutions", aliases=["show", "solutions", "s"], help="show or save the calculated solutions", parents=[filterable_parser])
     show_solutions_parser.set_defaults(cmd="show-solutions")
     show_solutions_parser.add_argument("--output", "-o", help=".csv file to save to instead of printing")
 
-    list_parser = subparsers.add_parser("list", aliases=["l"], help="list some stuff about meshes in the database", parents=[filterable_parser])
+    list_parser = subparsers.add_parser(
+        "list",
+        aliases=["l"],
+        help="list some stuff about meshes in the database",
+        epilog=f"Available columns are:\n{chr(10).join(f'  {k}: {v[0]}' for k,v in TABLE_COLUMN_DEFS.items())}\nYou can also use the special column option 'a', which is equivalent to '{ALL_COLUMNS}'",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[filterable_parser]
+    )
     list_parser.set_defaults(cmd="list")
+    list_parser.add_argument("--columns", "-c", default="nsSuU", help=f"which columns to show. See below for options. Default: '%(default)s'")
 
     # vvv   Plotting Args   vvv
 
@@ -523,10 +537,10 @@ if __name__ == "__main__":
     animate_solution_parser = subparsers.add_parser("animate-solution", aliases=["a"], help="animate a solution rotating", parents=[plot_parser, single_plot_parser, solution_plot_parser])
     animate_solution_parser.set_defaults(cmd="animate-solution", label_points=False)
 
-    save_plots_parser = subparsers.add_parser("save-plots", aliases=["sp"], help="save plot images", parents=[plot_parser])
+    save_plots_parser = subparsers.add_parser("save-plots", aliases=["sp"], help="save plot images", parents=[plot_parser, filterable_parser])
     save_plots_parser.set_defaults(cmd="save-plots")
 
-    save_all_plots_parser = subparsers.add_parser("save-all-plots", aliases=["sap"], help="save plot images for every solution in the database", parents=[plot_parser])
+    save_all_plots_parser = subparsers.add_parser("save-all-plots", aliases=["sap"], help="save plot images for every solution in the database", parents=[plot_parser, filterable_parser])
     save_all_plots_parser.set_defaults(cmd="save-all-plots")
 
     # ^^^   Plotting Args   ^^^
@@ -556,7 +570,7 @@ if __name__ == "__main__":
                     n_loops = 0
                     with tqdm(desc="Loops", unit="") as status_bar:
                         while True:
-                            solution_size, solution, t_seconds = minimum_covering_planes(db, args.name)
+                            solution_size, solution, t_seconds = minimum_covering_planes(db, args.name, args.exclude_3s)
                             if not args.quiet:
                                 print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
                             n_loops += 1
@@ -586,14 +600,8 @@ if __name__ == "__main__":
                 except KeyboardInterrupt:
                     print(f"\nexiting after {n_loops} loops")
 
-            elif args.cmd == "show-solutions":
-                if args.output is not None:
-                    save_solutions_csv(db, args.output, db_filter)
-                else:
-                    print_solutions(db, db_filter)
-
             elif args.cmd == "list":
-                list_database(db, db_filter)
+                list_database(db, db_filter, args.columns)
 
             elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
                 row = db[args.name]
@@ -610,7 +618,8 @@ if __name__ == "__main__":
                     animate_solution(fig, ax, animation_rotate, 120, args.name)
 
             elif args.cmd == "save-plots":
-                for name in tqdm(db, "Saving plots"):
+                for name in (progress_bar := tqdm(db_filter(db), "Saving plots")):
+                    progress_bar.set_postfix({"current": name})
                     row = db[name]
                     mesh = row["mesh"]
                     solution = row["solutions"][0]
@@ -621,7 +630,8 @@ if __name__ == "__main__":
                     plt.close(fig)
 
             elif args.cmd == "save-all-plots":
-                for name in tqdm(db, "Saving all plots", position=0):
+                for name in (progress_bar := tqdm(db_filter(db), "Saving all plots", position=0)):
+                    progress_bar.set_postfix({"current": name})
                     row = db[name]
                     mesh = row["mesh"]
                     title = f'{row["fullname"]} ({name})'
@@ -647,3 +657,7 @@ if __name__ == "__main__":
     for h in logger.handlers:
         h.flush()
         h.close()
+
+
+#TODO: lower bound from (vertices) / (max plane size)
+#TODO: filter by above upper bound / at lower bound
