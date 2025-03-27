@@ -13,3 +13,4 @@ names.py
 *.gif
 *.webm
 *.log
+.~lock.*

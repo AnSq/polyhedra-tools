@@ -55,20 +55,37 @@ DB_FILE = "database.db"
 class Filter:
     """controls which meshes are processed in an operation"""
 
-    def __init__(self, name_re:str=None, solution_range:Sequence[int]=None) -> None:
+    LOWER_BOUND_OPTIONS = ("above", "at", "below")
+
+    def __init__(self, name_re:str=None, solution_range:Sequence[int]=None, lower_bound:str=None) -> None:
+
+        if lower_bound not in self.LOWER_BOUND_OPTIONS + (None,):
+            raise ValueError(f"lower_bound must be one of {self.LOWER_BOUND_OPTIONS + (None,)}")
+
         self.name_re = re.compile(name_re) if (name_re is not None) else None
         self.solution_range = solution_range
+        self.lower_bound = lower_bound
 
     def __repr__(self) -> str:
-        return f"Filter({repr(None if not self.name_re else self.name_re.pattern)}, {self.solution_range})"
+        return f"Filter({repr(None if not self.name_re else self.name_re.pattern)}, {self.solution_range}, {self.lower_bound})"
 
     def __call__(self, db:shelve.Shelf) -> list[str]:
         """return a list of db keys (names) that pass the filter"""
         result = []
         for name in db:
-            if (self.name_re is None or self.name_re.search(name)) \
-            and (self.solution_range is None or (self.solution_range[0] <= (db[name]["best_solution"] or 0) <= self.solution_range[1])):
+            best_solution = db[name]["best_solution"] or 0
+            lb = find_lower_bound(db[name]["mesh"], db[name]["planes"])
+
+            if ((self.name_re is None or self.name_re.search(name))
+            and (self.solution_range is None or (self.solution_range[0] <= best_solution <= self.solution_range[1]))
+            and (
+                self.lower_bound is None
+                or (self.lower_bound == "above" and best_solution > lb)
+                or (self.lower_bound == "at" and best_solution == lb)
+                or (self.lower_bound == "below" and best_solution < lb)
+            )):
                 result.append(name)
+
         return result
 
 
@@ -110,7 +127,8 @@ def load_mesh(db:shelve.Shelf, fname:str, clear=False) -> tuple[str,off.Mesh] | 
             "best_solution" : None,
             "num_solutions" : 0,
             "solutions"     : [],
-            "planes"        : []
+            "planes"        : [],
+            "lower_bound"   : 0,
         }
 
     db[name]["mesh"] = mesh
@@ -191,6 +209,7 @@ def find_all_planes(db:shelve.Shelf, db_filter:Filter, overwrite=False) -> int:
         progress_bar.set_postfix({"current": name})
         try:
             db[name]["planes"] = find_planes(db[name]["mesh"], name)
+            db[name]["lower_bound"] = find_lower_bound(db[name]["mesh"], db[name]["planes"])
             db.sync()
         except ValueError as e:
             logger.error(e)
@@ -221,6 +240,18 @@ def find_upper_bound(mesh:off.Mesh, name:str=None, print_=False) -> tuple[int,st
         msg = f"{name} {values} | upper bound = {ub} | from:"
         print(msg + reason)
     return (ub, reason.strip())
+
+
+def find_lower_bound(mesh:off.Mesh, planes:PlaneSet) -> int:
+    largest_plane = max(len(p) for p in planes)
+    return math.ceil(mesh.num_points / largest_plane)
+
+
+def _add_lower_bounds(db:shelve.Shelf) -> None:
+    """add lower_bound to a database that didn't originally have it"""
+    for name in db:
+        db[name]["lower_bound"] = find_lower_bound(db[name]["mesh"], db[name]["planes"])
+        db.sync()
 
 
 def minimum_covering_planes(db:shelve.Shelf, name:str, exclude_3s=False) -> tuple[int,frozenset[frozenset[int]],float]:
@@ -444,8 +475,9 @@ TABLE_COLUMN_DEFS = {
     "u": ("Upper Bound",    lambda r: r["upper_bound"]),
     "U": ("U.B. Reason",    lambda r: r["ub_reason"]),
     "p": ("Total Planes",   lambda r: len(r["planes"])),
+    "l": ("Lower Bound",    lambda r: r["lower_bound"])
 }
-ALL_COLUMNS = "nvefsSuUpN"
+ALL_COLUMNS = "nvefsSuUlpN"
 
 def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMNS, csv_file:str=None) -> None:
     if columns == "a":
@@ -468,7 +500,8 @@ def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMN
             writer.writerow(headers)
             writer.writerows(table)
     else:
-        print(tabulate(table, headers=headers))
+        print(tabulate(table, headers=headers, tablefmt="rounded_outline"))
+        print(f"{len(table)} records")
 
 
 if __name__ == "__main__":
@@ -483,6 +516,7 @@ if __name__ == "__main__":
     filterable_parser_group = filterable_parser.add_argument_group("Filter options")
     filterable_parser_group.add_argument("--solution-range", "-r", nargs=2, type=int, metavar=("MIN", "MAX"), help="only process meshes with solutions in the given range")
     filterable_parser_group.add_argument("--name-re", "-n", help="only process meshes with names matching the given regex")
+    filterable_parser_group.add_argument("--lower-bound", "--lb", choices=Filter.LOWER_BOUND_OPTIONS, help="filter by solution size's relationship to the lower bound")
 
     load_mesh_parser = subparsers.add_parser("load-mesh", aliases=["lm"], help="load a mesh file")
     load_mesh_parser.set_defaults(cmd="load-mesh")
@@ -515,7 +549,7 @@ if __name__ == "__main__":
         "list",
         aliases=["l"],
         help="list some stuff about meshes in the database",
-        epilog=f"Available columns are:\n{chr(10).join(f'  {k}: {v[0]}' for k,v in TABLE_COLUMN_DEFS.items())}\nYou can also use the special column option 'a', which is equivalent to '{ALL_COLUMNS}'",
+        epilog=f"Available columns are:\n{chr(10).join(f'  {k}: {v[0]}' for k,v in TABLE_COLUMN_DEFS.items())}\nYou can also use the special column option 'a', which is equivalent to '{ALL_COLUMNS}'",  # chr(10) is newline, because backslashes "aren't allowed" in f-string expressions
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[filterable_parser]
     )
@@ -558,7 +592,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     if getattr(args, "filterable", False):
-        db_filter = Filter(args.name_re, args.solution_range)
+        db_filter = Filter(args.name_re, args.solution_range, args.lower_bound)
 
     with open_db() as db:
         try:
@@ -667,5 +701,4 @@ if __name__ == "__main__":
         h.close()
 
 
-#TODO: lower bound from (vertices) / (max plane size)
-#TODO: filter by above upper bound / at lower bound
+#TODO: filter by above upper bound
