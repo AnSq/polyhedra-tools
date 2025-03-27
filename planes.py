@@ -8,6 +8,7 @@ import shelve
 import logging
 import argparse
 import functools
+import csv
 
 from typing import Callable
 from collections.abc import Sequence
@@ -446,7 +447,7 @@ TABLE_COLUMN_DEFS = {
 }
 ALL_COLUMNS = "nvefsSuUpN"
 
-def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMNS) -> None:
+def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMNS, csv_file:str=None) -> None:
     if columns == "a":
         columns = ALL_COLUMNS
 
@@ -461,7 +462,13 @@ def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMN
             table_row.append(TABLE_COLUMN_DEFS[c][1](db[name]))
         table.append(table_row)
 
-    print(tabulate(table, headers=headers))
+    if csv_file:
+        with open(csv_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerows(table)
+    else:
+        print(tabulate(table, headers=headers))
 
 
 if __name__ == "__main__":
@@ -513,7 +520,8 @@ if __name__ == "__main__":
         parents=[filterable_parser]
     )
     list_parser.set_defaults(cmd="list")
-    list_parser.add_argument("--columns", "-c", default="nsSuU", help=f"which columns to show. See below for options. Default: '%(default)s'")
+    list_parser.add_argument("--columns", "-c", default="nsSuU", help="which columns to show. See below for options. Default: '%(default)s'")
+    list_parser.add_argument("--csv", metavar="FNAME", dest="csv_file", help="write to the given CSV file instead of printing a table")
 
     # vvv   Plotting Args   vvv
 
@@ -601,7 +609,7 @@ if __name__ == "__main__":
                     print(f"\nexiting after {n_loops} loops")
 
             elif args.cmd == "list":
-                list_database(db, db_filter, args.columns)
+                list_database(db, db_filter, args.columns, args.csv_file)
 
             elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
                 row = db[args.name]
