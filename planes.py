@@ -338,6 +338,18 @@ def find_duplicate_points(planes:list[frozenset[int]]) -> list[bool]:
     return result
 
 
+def find_point_use_counts(planes:list[frozenset[int]]) -> list[int]:
+    d = collections.defaultdict(int)
+    for plane in planes:
+        for point in plane:
+            d[point] += 1
+
+    result = []
+    for i in range(max(d)+1):
+        result.append(d[i])
+    return result
+
+
 def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str, origin_vectors:float=0, show_edges=True, label_points=False):
     ax:Axes3D
     fig, ax = plt.subplots(figsize=(4.8, 4.8), subplot_kw={"projection": "3d"})
@@ -529,8 +541,9 @@ def canonicalize_vector(v:Vector, round_digits=ROUND_DIGITS) -> Vector:
     """convert a vector into a 'canonical' unit-vector form that allows [anti]parallel vectors to be checked for 'equality'"""
     for i in range(len(v)):
         if v[i] != 0:
+            # flip the vector if necessary so that the first non-zero component is positive
             return ((abs(v[i]) / v[i]) * v.unit()).round(round_digits)
-    return v
+    return v  # zero vector
 
 
 T = TypeVar("T")
@@ -545,7 +558,7 @@ def group_by(seq:Sequence[T], key:Callable[[T],G]) -> dict[G,list[T]]:
     return functools.reduce(func, seq, collections.defaultdict(list))
 
 
-def parallel_groups(db:shelve.Shelf, name:str, solution_num:int):
+def find_parallel_groups(db:shelve.Shelf, name:str, solution_num:int):
     """find groups of parallel planes in a solution"""
     row = db[name]
     mesh = row["mesh"]
@@ -556,6 +569,42 @@ def parallel_groups(db:shelve.Shelf, name:str, solution_num:int):
         return tuple(float(i) for i in canonicalize_vector(pl.normal))
 
     return group_by(solution, key)
+
+
+def solution_stats(db:shelve.Shelf, name:str, solution_num:int) -> dict[str,Any]:
+    result = {
+        "name"       : name,
+        "solution #" : solution_num
+    }
+
+    point_use_counts = find_point_use_counts(list(db[name]["solutions"][solution_num]))
+    result["num. reused points"] = [i>1 for i in point_use_counts].count(True)
+
+    parallel_groups = find_parallel_groups(db, name, solution_num)
+    parallel_group_size_counts:dict[int,int] = collections.defaultdict(int)
+    for v, group in parallel_groups.items():
+        parallel_group_size_counts[len(group)] += 1
+
+    for i in range(1, db[name]["best_solution"]+1):
+        result[f"||{i:02d}"] = parallel_group_size_counts[i]
+
+    for i, count in enumerate(point_use_counts):
+        result[f"p{i:02d} uses"] = count
+
+    return result
+
+
+def all_solution_stats(db:shelve.Shelf, name:str, csv_file:str) -> None:
+    row = db[name]
+
+    output_rows:list[dict[str,Any]] = []
+    for i in range(len(row["solutions"])):
+        output_rows.append(solution_stats(db, name, i))
+
+    with open(csv_file, "w", newline="") as f:
+        writer = csv.DictWriter(f, output_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(output_rows)
 
 
 if __name__ == "__main__":
@@ -644,6 +693,10 @@ if __name__ == "__main__":
     save_all_plots_parser.set_defaults(cmd="save-all-plots")
 
     # ^^^   Plotting Args   ^^^
+
+    solution_stats_parser = subparsers.add_parser("solution-stats", aliases=["t"], help="show stats of all solutions for a mesh", parents=[single_plot_parser])
+    solution_stats_parser.set_defaults(cmd="solution-stats")
+    solution_stats_parser.add_argument("csv_file", help="file to output")
 
     args = parser.parse_args()
     if getattr(args, "filterable", False):
@@ -741,6 +794,9 @@ if __name__ == "__main__":
                         fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
                         fig.savefig(f"output/plots/{name}/{name}_{i}.png")
                         plt.close(fig)
+
+            elif args.cmd == "solution-stats":
+                all_solution_stats(db, args.name, args.csv_file)
 
         except KeyboardInterrupt:
             print("KeyboardInterrupt")
