@@ -8,9 +8,10 @@ import shelve
 import logging
 import argparse
 import functools
+import collections
 import csv
 
-from typing import Callable
+from typing import Any, Callable, TypeVar
 from collections.abc import Sequence
 
 from skspatial.objects import Plane, Point, Points, LineSegment, Vector
@@ -49,6 +50,7 @@ setcover_logger = logging.getLogger("setcover")
 setcover.np.seterr(divide="ignore", invalid="ignore")
 
 TOLERANCE = 1e-12
+ROUND_DIGITS = int(-math.log10(TOLERANCE))
 DB_FILE = "database.db"
 
 
@@ -400,7 +402,7 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str,
         yc = sum(c[1] for c in coords) / len(coords)
         zc = sum(c[2] for c in coords) / len(coords)
         center = [xc, yc, zc]
-        # LineSegment(center, Point(center) + 0.1*normal).plot_3d(ax, color="orange", linewidth=0.5)  # plane normal
+        # LineSegment(center, Point(center) + 0.1*canonicalize_vector(normal)).plot_3d(ax, color="orange", linewidth=0.5)  # plane normal
 
         # sort points in plane by angle around center
         start = coords[0]
@@ -521,6 +523,39 @@ def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMN
         except UnicodeEncodeError:
             print(tabulate(table, headers=headers, tablefmt="outline"))
         print(f"{len(table)} records")
+
+
+def canonicalize_vector(v:Vector, round_digits=ROUND_DIGITS) -> Vector:
+    """convert a vector into a 'canonical' unit-vector form that allows [anti]parallel vectors to be checked for 'equality'"""
+    for i in range(len(v)):
+        if v[i] != 0:
+            return ((abs(v[i]) / v[i]) * v.unit()).round(round_digits)
+    return v
+
+
+T = TypeVar("T")
+G = TypeVar("G")
+def group_by(seq:Sequence[T], key:Callable[[T],G]) -> dict[G,list[T]]:
+    # https://stackoverflow.com/a/60282640
+
+    def func(groups:dict[G,list[T]], value:T) -> dict[G,list[T]]:
+        groups[key(value)].append(value)
+        return groups
+
+    return functools.reduce(func, seq, collections.defaultdict(list))
+
+
+def parallel_groups(db:shelve.Shelf, name:str, solution_num:int):
+    """find groups of parallel planes in a solution"""
+    row = db[name]
+    mesh = row["mesh"]
+    solution:list[frozenset[int]] = list(row["solutions"][solution_num])
+
+    def key(plane:frozenset[int]) -> tuple[float,...]:
+        pl = Plane.from_points(*[mesh.points[i].coords for i in plane][:3])
+        return tuple(float(i) for i in canonicalize_vector(pl.normal))
+
+    return group_by(solution, key)
 
 
 if __name__ == "__main__":

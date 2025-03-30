@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TOLERANCE = 1e-12
+ROUND_DIGITS = int(-log10(TOLERANCE))
 
 
 def passfail(x:Any):
@@ -334,7 +335,7 @@ class Mesh:
         return result
 
 
-    def check_unit_edges(self, round_digits=int(-log10(TOLERANCE))) -> bool:
+    def check_unit_edges(self, round_digits=ROUND_DIGITS) -> bool:
         """check that all edges have a length of 1"""
         lengths = set(round(e.length, round_digits) for e in self.edges)
         if lengths != {1}:
