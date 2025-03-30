@@ -30,6 +30,7 @@ import matplotlib.legend_handler
 
 from tabulate import tabulate
 from tqdm import tqdm  #type: ignore
+import natsort
 
 import off
 
@@ -55,26 +56,33 @@ DB_FILE = "database.db"
 class Filter:
     """controls which meshes are processed in an operation"""
 
-    LOWER_BOUND_OPTIONS = ("above", "at", "below")
+    BOUND_OPTIONS = ("above", "at", "below")
 
-    def __init__(self, name_re:str=None, solution_range:Sequence[int]=None, lower_bound:str=None) -> None:
 
-        if lower_bound not in self.LOWER_BOUND_OPTIONS + (None,):
-            raise ValueError(f"lower_bound must be one of {self.LOWER_BOUND_OPTIONS + (None,)}")
+    def __init__(self, name_re:str=None, solution_range:Sequence[int]=None, lower_bound:str=None, upper_bound:str=None) -> None:
+
+        if lower_bound not in self.BOUND_OPTIONS + (None,):
+            raise ValueError(f"lower_bound must be one of {self.BOUND_OPTIONS + (None,)}")
+        if upper_bound not in self.BOUND_OPTIONS + (None,):
+            raise ValueError(f"upper_bound must be one of {self.BOUND_OPTIONS + (None,)}")
 
         self.name_re = re.compile(name_re) if (name_re is not None) else None
         self.solution_range = solution_range
         self.lower_bound = lower_bound
+        self.upper_bound = upper_bound
+
 
     def __repr__(self) -> str:
         return f"Filter({repr(None if not self.name_re else self.name_re.pattern)}, {self.solution_range}, {self.lower_bound})"
+
 
     def __call__(self, db:shelve.Shelf) -> list[str]:
         """return a list of db keys (names) that pass the filter"""
         result = []
         for name in db:
             best_solution = db[name]["best_solution"] or 0
-            lb = find_lower_bound(db[name]["mesh"], db[name]["planes"])
+            lb = db[name]["lower_bound"]
+            ub = db[name]["upper_bound"]
 
             if ((self.name_re is None or self.name_re.search(name))
             and (self.solution_range is None or (self.solution_range[0] <= best_solution <= self.solution_range[1]))
@@ -83,6 +91,12 @@ class Filter:
                 or (self.lower_bound == "above" and best_solution > lb)
                 or (self.lower_bound == "at" and best_solution == lb)
                 or (self.lower_bound == "below" and best_solution < lb)
+            )
+            and (
+                self.upper_bound is None
+                or (self.upper_bound == "above" and best_solution > ub)
+                or (self.upper_bound == "at" and best_solution == ub)
+                or (self.upper_bound == "below" and best_solution < ub)
             )):
                 result.append(name)
 
@@ -301,13 +315,15 @@ def minimum_covering_planes(db:shelve.Shelf, name:str, exclude_3s=False) -> tupl
     return (solution_size, solution, seconds)
 
 
-def all_minimum_covering_planes(db:shelve.Shelf, db_filter:Filter) -> int:
-    """calculate minimum covering planes for all meshes that pass the filter. Return how many were processed"""
-    matches = db_filter(db)
-    for name in (progress_bar := tqdm(matches, desc="Finding all minimum covering planes", leave=False)):
+def all_minimum_covering_planes(db:shelve.Shelf, db_filter:Filter, keys:list[str]=None) -> int:
+    """calculate minimum covering planes for all meshes that pass the filter. Return how many were processed.
+    If keys is supplied, only those db keys will be processed and db_filter will be ignored."""
+    if not keys:
+        keys = db_filter(db)
+    for name in (progress_bar := tqdm(keys, desc="Finding all minimum covering planes", leave=False)):
         progress_bar.set_postfix({"current": name})
         minimum_covering_planes(db, name)
-    return len(matches)
+    return len(keys)
 
 
 def find_duplicate_points(planes:list[frozenset[int]]) -> list[bool]:
@@ -378,18 +394,18 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str,
         coords = [mesh.points[j].coords for j in plane]
 
         pl = Plane.from_points(*coords[:3])
-        normal = pl.normal
+        normal = pl.normal.unit()
 
         xc = sum(c[0] for c in coords) / len(coords)
         yc = sum(c[1] for c in coords) / len(coords)
         zc = sum(c[2] for c in coords) / len(coords)
         center = [xc, yc, zc]
+        # LineSegment(center, Point(center) + 0.1*normal).plot_3d(ax, color="orange", linewidth=0.5)  # plane normal
 
+        # sort points in plane by angle around center
         start = coords[0]
         vector_a = Vector.from_points(center, start)
-
         angle_coords = []
-
         for _, c in enumerate(coords):
             vector_b = Vector.from_points(center, c)
             if c == start:
@@ -399,7 +415,6 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str,
             else:
                 angle = vector_a.angle_signed_3d(vector_b, normal)
             angle_coords.append((angle, c))
-
         coords_sorted = [ac[1] for ac in sorted(angle_coords)]
 
         basecolor = colors[i % len(colors)]
@@ -493,6 +508,7 @@ def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMN
         for c in columns:
             table_row.append(TABLE_COLUMN_DEFS[c][1](db[name]))
         table.append(table_row)
+    table.sort(key=natsort.natsort_key)
 
     if csv_file:
         with open(csv_file, "w", newline="") as f:
@@ -500,7 +516,10 @@ def list_database(db:shelve.Shelf, db_filter:Filter=Filter(), columns=ALL_COLUMN
             writer.writerow(headers)
             writer.writerows(table)
     else:
-        print(tabulate(table, headers=headers, tablefmt="rounded_outline"))
+        try:
+            print(tabulate(table, headers=headers, tablefmt="rounded_outline"))
+        except UnicodeEncodeError:
+            print(tabulate(table, headers=headers, tablefmt="outline"))
         print(f"{len(table)} records")
 
 
@@ -516,7 +535,8 @@ if __name__ == "__main__":
     filterable_parser_group = filterable_parser.add_argument_group("Filter options")
     filterable_parser_group.add_argument("--solution-range", "-r", nargs=2, type=int, metavar=("MIN", "MAX"), help="only process meshes with solutions in the given range")
     filterable_parser_group.add_argument("--name-re", "-n", help="only process meshes with names matching the given regex")
-    filterable_parser_group.add_argument("--lower-bound", "--lb", choices=Filter.LOWER_BOUND_OPTIONS, help="filter by solution size's relationship to the lower bound")
+    filterable_parser_group.add_argument("--lower-bound", "--lb", choices=Filter.BOUND_OPTIONS, help="filter by solution size's relationship to the lower bound")
+    filterable_parser_group.add_argument("--upper-bound", "--ub", choices=Filter.BOUND_OPTIONS, help="filter by solution size's relationship to the upper bound")
 
     load_mesh_parser = subparsers.add_parser("load-mesh", aliases=["lm"], help="load a mesh file")
     load_mesh_parser.set_defaults(cmd="load-mesh")
@@ -540,6 +560,7 @@ if __name__ == "__main__":
 
     all_minimum_covering_planes_parser = subparsers.add_parser("all-minimum-covering-planes", aliases=["amcp"], help="find the minimum covering planes of all meshes", parents=[loopable_parser, filterable_parser])
     all_minimum_covering_planes_parser.set_defaults(cmd="all-minimum-covering-planes")
+    all_minimum_covering_planes_parser.add_argument("--dynamic-filter", "--df", action="store_true", help="recompute the filter every loop")
 
     show_solutions_parser = subparsers.add_parser("show-solutions", aliases=["show", "solutions", "s"], help="show or save the calculated solutions", parents=[filterable_parser])
     show_solutions_parser.set_defaults(cmd="show-solutions")
@@ -579,6 +600,8 @@ if __name__ == "__main__":
     animate_solution_parser = subparsers.add_parser("animate-solution", aliases=["a"], help="animate a solution rotating", parents=[plot_parser, single_plot_parser, solution_plot_parser])
     animate_solution_parser.set_defaults(cmd="animate-solution", label_points=False)
 
+    #TODO: animate all
+
     save_plots_parser = subparsers.add_parser("save-plots", aliases=["sp"], help="save plot images", parents=[plot_parser, filterable_parser])
     save_plots_parser.set_defaults(cmd="save-plots")
 
@@ -587,12 +610,9 @@ if __name__ == "__main__":
 
     # ^^^   Plotting Args   ^^^
 
-    test_filter_parser = subparsers.add_parser("test-filter", aliases=["tf"], help="list which meshes pass the given filter", parents=[filterable_parser])
-    test_filter_parser.set_defaults(cmd="test-filter")
-
     args = parser.parse_args()
     if getattr(args, "filterable", False):
-        db_filter = Filter(args.name_re, args.solution_range, args.lower_bound)
+        db_filter = Filter(args.name_re, args.solution_range, args.lower_bound, args.upper_bound)
 
     with open_db() as db:
         try:
@@ -628,10 +648,14 @@ if __name__ == "__main__":
                 if args.loop:
                     stream_handler.setLevel(logging.ERROR)
                 try:
+                    if args.dynamic_filter:
+                        keys = None
+                    else:
+                        keys = db_filter(db)
                     n_loops = 0
                     with tqdm(desc="Loops", unit="", position=1) as status_bar:
                         while True:
-                            num_processed = all_minimum_covering_planes(db, db_filter)
+                            num_processed = all_minimum_covering_planes(db, db_filter, keys)
                             if not num_processed:
                                 break
                             n_loops += 1
@@ -683,13 +707,6 @@ if __name__ == "__main__":
                         fig.savefig(f"output/plots/{name}/{name}_{i}.png")
                         plt.close(fig)
 
-            elif args.cmd == "test-filter":
-                print(db_filter)
-                matches = db_filter(db)
-                for name in matches:
-                    print(f'{name}\t\t({db[name]["best_solution"]})')
-                print(f"({len(matches)} matches)")
-
         except KeyboardInterrupt:
             print("KeyboardInterrupt")
 
@@ -699,6 +716,3 @@ if __name__ == "__main__":
     for h in logger.handlers:
         h.flush()
         h.close()
-
-
-#TODO: filter by above upper bound
