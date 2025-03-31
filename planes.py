@@ -8,8 +8,9 @@ import shelve
 import logging
 import argparse
 import functools
-import collections
+from collections import defaultdict
 import csv
+import json
 
 from typing import Any, Callable, TypeVar
 from collections.abc import Sequence
@@ -106,8 +107,8 @@ class Filter:
 
 
 
-def open_db(fname=DB_FILE) -> shelve.Shelf:
-    return shelve.open(fname, writeback=True)
+def open_db(fname=DB_FILE, readonly=False) -> shelve.Shelf:
+    return shelve.open(fname, "r" if readonly else "c", writeback=True)
 
 
 def load_mesh(db:shelve.Shelf, fname:str, clear=False) -> tuple[str,off.Mesh] | tuple[None,None]:
@@ -339,7 +340,7 @@ def find_duplicate_points(planes:list[frozenset[int]]) -> list[bool]:
 
 
 def find_point_use_counts(planes:list[frozenset[int]]) -> list[int]:
-    d = collections.defaultdict(int)
+    d:dict[int,int] = defaultdict(int)
     for plane in planes:
         for point in plane:
             d[point] += 1
@@ -485,9 +486,9 @@ def animation_rotate(i:int, *, ax:Axes3D, total:int):
     ax.view_init(*rotation_function(i, total))
 
 
-def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, fname:str, tqdm_position:int=0):
+def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, fname:str, tqdm_position:int=0, metadata=None):
     anim = animation.FuncAnimation(fig, func=functools.partial(anim_func, ax=ax, total=num_frames), frames=num_frames, interval=33)
-    writer = animation.FFMpegWriter(fps=30, codec="libvpx-vp9", extra_args=["-crf", "30", "-b:v", "0"])
+    writer = animation.FFMpegWriter(fps=30, codec="libvpx-vp9", extra_args=["-crf", "30", "-b:v", "0"], metadata=metadata or {})
     os.makedirs("output/animation", exist_ok=True)
     with tqdm(total=num_frames, desc=f"Saving animation {fname}", position=tqdm_position) as progress_bar:
         anim.save(f"output/animation/{fname}.webm", writer, progress_callback=lambda c,t: progress_bar.update(1))
@@ -555,7 +556,7 @@ def group_by(seq:Sequence[T], key:Callable[[T],G]) -> dict[G,list[T]]:
         groups[key(value)].append(value)
         return groups
 
-    return functools.reduce(func, seq, collections.defaultdict(list))
+    return functools.reduce(func, seq, defaultdict(list))
 
 
 def find_parallel_groups(db:shelve.Shelf, name:str, solution_num:int):
@@ -576,22 +577,31 @@ def solution_stats(db:shelve.Shelf, name:str, solution_num:int) -> dict[str,Any]
         "name"       : name,
         "solution #" : solution_num
     }
+    key = []
+    niceness = 0
 
     point_use_counts = find_point_use_counts(list(db[name]["solutions"][solution_num]))
-    result["num. reused points"] = [i>1 for i in point_use_counts].count(True)
+    num_reused_points = [i>1 for i in point_use_counts].count(True)
+    result["num. reused points"] = num_reused_points
+    key.append(db[name]["mesh"].num_points - num_reused_points)
 
     parallel_groups = find_parallel_groups(db, name, solution_num)
-    parallel_group_size_counts:dict[int,int] = collections.defaultdict(int)
+    parallel_group_size_counts:dict[int,int] = defaultdict(int)
     for v, group in parallel_groups.items():
         parallel_group_size_counts[len(group)] += 1
 
     for i in range(1, db[name]["best_solution"]+1):
-        result[f"||{i:02d}"] = parallel_group_size_counts[i]
+        value = parallel_group_size_counts[i] * i
+        result[f"||{i:02d}"] = value
+        key.append(value)
+        niceness += value * (db[name]["best_solution"] ** i)
+
+    key.reverse()
 
     for i, count in enumerate(point_use_counts):
         result[f"p{i:02d} uses"] = count
 
-    return result
+    return (result, key, niceness)  # I hate this
 
 
 def all_solution_stats(db:shelve.Shelf, name:str, csv_file:str) -> None:
@@ -599,7 +609,7 @@ def all_solution_stats(db:shelve.Shelf, name:str, csv_file:str) -> None:
 
     output_rows:list[dict[str,Any]] = []
     for i in range(len(row["solutions"])):
-        output_rows.append(solution_stats(db, name, i))
+        output_rows.append(solution_stats(db, name, i)[0])
 
     with open(csv_file, "w", newline="") as f:
         writer = csv.DictWriter(f, output_rows[0].keys())
@@ -607,8 +617,27 @@ def all_solution_stats(db:shelve.Shelf, name:str, csv_file:str) -> None:
         writer.writerows(output_rows)
 
 
+def find_nicest_solutions(db:shelve.Shelf, outfile:str=None) -> dict[str,list[int]]:
+    result:dict[str,list[int]] = {}
+    for name in (progress_bar0 := tqdm(db, "Finding nicest solutions", leave=False)):
+        progress_bar0.set_postfix({"current": name})
+        solutionnums_keys:list[tuple[int,tuple[int,...]]] = []
+        for i, s in enumerate(tqdm(db[name]["solutions"], leave=False, position=1)):
+            solutionnums_keys.append((i, tuple(solution_stats(db, name, i)[1])))
+        niceness_groups = group_by(solutionnums_keys, lambda x: x[1])
+        nicest = [i[0] for i in niceness_groups[max(niceness_groups)]]
+        result[name] = sorted(nicest)
+
+    if outfile:
+        with open(outfile, "w") as f:
+            json.dump(result, f, indent="\t")
+
+    return result
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.set_defaults(readonly=False)
     subparsers = parser.add_subparsers(title="commands", required=True)
 
     loopable_parser = argparse.ArgumentParser(add_help=False)
@@ -646,10 +675,6 @@ if __name__ == "__main__":
     all_minimum_covering_planes_parser.set_defaults(cmd="all-minimum-covering-planes")
     all_minimum_covering_planes_parser.add_argument("--dynamic-filter", "--df", action="store_true", help="recompute the filter every loop")
 
-    show_solutions_parser = subparsers.add_parser("show-solutions", aliases=["show", "solutions", "s"], help="show or save the calculated solutions", parents=[filterable_parser])
-    show_solutions_parser.set_defaults(cmd="show-solutions")
-    show_solutions_parser.add_argument("--output", "-o", help=".csv file to save to instead of printing")
-
     list_parser = subparsers.add_parser(
         "list",
         aliases=["l"],
@@ -658,13 +683,14 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[filterable_parser]
     )
-    list_parser.set_defaults(cmd="list")
+    list_parser.set_defaults(cmd="list", readonly=True)
     list_parser.add_argument("--columns", "-c", default="nsSuU", help="which columns to show. See below for options. Default: '%(default)s'")
     list_parser.add_argument("--csv", metavar="FNAME", dest="csv_file", help="write to the given CSV file instead of printing a table")
 
     # vvv   Plotting Args   vvv
 
     plot_parser = argparse.ArgumentParser(add_help=False)
+    plot_parser.set_defaults(readonly=True)
     plot_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
     plot_parser.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
     plot_parser.add_argument("--label-points", "-p", action="store_true", help="show point index numbers")
@@ -695,114 +721,123 @@ if __name__ == "__main__":
     # ^^^   Plotting Args   ^^^
 
     solution_stats_parser = subparsers.add_parser("solution-stats", aliases=["t"], help="show stats of all solutions for a mesh", parents=[single_plot_parser])
-    solution_stats_parser.set_defaults(cmd="solution-stats")
+    solution_stats_parser.set_defaults(cmd="solution-stats", readonly=True)
     solution_stats_parser.add_argument("csv_file", help="file to output")
 
     args = parser.parse_args()
     if getattr(args, "filterable", False):
         db_filter = Filter(args.name_re, args.solution_range, args.lower_bound, args.upper_bound)
 
-    with open_db() as db:
-        try:
-            if args.cmd == "load-mesh":
-                load_mesh(db, args.meshfile, args.clear)
+    db = open_db(readonly=args.readonly)
+    try:
+        if args.cmd == "load-mesh":
+            load_mesh(db, args.meshfile, args.clear)
 
-            elif args.cmd == "load-mesh-dir":
-                load_meshes(db, args.dir, args.clear)
+        elif args.cmd == "load-mesh-dir":
+            load_meshes(db, args.dir, args.clear)
 
-            elif args.cmd == "find-planes":
-                find_all_planes(db, db_filter, args.overwrite)
+        elif args.cmd == "find-planes":
+            find_all_planes(db, db_filter, args.overwrite)
 
-            elif args.cmd == "minimum-covering-planes":
-                if args.loop:
-                    stream_handler.setLevel(logging.ERROR)
-                try:
-                    n_loops = 0
-                    with tqdm(desc="Loops", unit="") as status_bar:
-                        while True:
-                            solution_size, solution, t_seconds = minimum_covering_planes(db, args.name, args.exclude_3s)
-                            if not args.quiet:
-                                print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
-                            n_loops += 1
-                            status_bar.update(1)
-                            if not args.loop:
-                                break
-                            file_handler.flush()
-                except KeyboardInterrupt:
+        elif args.cmd == "minimum-covering-planes":
+            if args.loop:
+                stream_handler.setLevel(logging.ERROR)
+            try:
+                n_loops = 0
+                with tqdm(desc="Loops", unit="") as status_bar:
+                    while True:
+                        solution_size, solution, t_seconds = minimum_covering_planes(db, args.name, args.exclude_3s)
+                        if not args.quiet:
+                            print(f"[{args.name}] found solution of {solution_size} in {t_seconds:.2f} seconds: {[list(i) for i in solution]}")
+                        n_loops += 1
+                        status_bar.update(1)
+                        if not args.loop:
+                            break
+                        file_handler.flush()
+            except KeyboardInterrupt:
 
-                    print(f"\nexiting after {n_loops} loops")
+                print(f"\nexiting after {n_loops} loops")
 
-            elif args.cmd == "all-minimum-covering-planes":
-                if args.loop:
-                    stream_handler.setLevel(logging.ERROR)
-                try:
-                    if args.dynamic_filter:
-                        keys = None
-                    else:
-                        keys = db_filter(db)
-                    n_loops = 0
-                    with tqdm(desc="Loops", unit="", position=1) as status_bar:
-                        while True:
-                            num_processed = all_minimum_covering_planes(db, db_filter, keys)
-                            if not num_processed:
-                                break
-                            n_loops += 1
-                            status_bar.update(1)
-                            if not args.loop:
-                                break
-                            file_handler.flush()
-                except KeyboardInterrupt:
-                    print(f"\nexiting after {n_loops} loops")
-
-            elif args.cmd == "list":
-                list_database(db, db_filter, args.columns, args.csv_file)
-
-            elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
-                row = db[args.name]
-                mesh = row["mesh"]
-                if args.cmd == "plot-mesh":
-                    solution = frozenset()
+        elif args.cmd == "all-minimum-covering-planes":
+            if args.loop:
+                stream_handler.setLevel(logging.ERROR)
+            try:
+                if args.dynamic_filter:
+                    keys = None
                 else:
-                    solution = row["solutions"][args.solution]
-                title = f'{row["fullname"]} ({args.name})'
-                fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
-                if args.cmd in ("plot-mesh", "plot-solution"):
-                    plt.show()
-                elif args.cmd == "animate-solution":
-                    animate_solution(fig, ax, animation_rotate, 120, args.name)
+                    keys = db_filter(db)
+                n_loops = 0
+                with tqdm(desc="Loops", unit="", position=1) as status_bar:
+                    while True:
+                        num_processed = all_minimum_covering_planes(db, db_filter, keys)
+                        if not num_processed:
+                            break
+                        n_loops += 1
+                        status_bar.update(1)
+                        if not args.loop:
+                            break
+                        file_handler.flush()
+            except KeyboardInterrupt:
+                print(f"\nexiting after {n_loops} loops")
 
-            elif args.cmd == "save-plots":
-                for name in (progress_bar := tqdm(db_filter(db), "Saving plots")):
-                    progress_bar.set_postfix({"current": name})
-                    row = db[name]
-                    mesh = row["mesh"]
-                    solution = row["solutions"][0]
-                    title = f'{row["fullname"]} ({name})'
+        elif args.cmd == "list":
+            list_database(db, db_filter, args.columns, args.csv_file)
+
+        elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
+            row = db[args.name]
+            mesh = row["mesh"]
+            if args.cmd == "plot-mesh":
+                solution = frozenset()
+            else:
+                solution = row["solutions"][args.solution]
+            title = f'{row["fullname"]} ({args.name})'
+            fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
+            if args.cmd in ("plot-mesh", "plot-solution"):
+                plt.show()
+            elif args.cmd == "animate-solution":
+                metadata = {
+                    "title"       : title,
+                    "description" : f"Minimum vertex-covering planes of the {title} (solution #{args.solution})",
+                }
+                animate_solution(fig, ax, animation_rotate, 120, args.name, metadata=metadata)
+
+        elif args.cmd == "save-plots":
+            for name in (progress_bar := tqdm(db_filter(db), "Saving plots")):
+                progress_bar.set_postfix({"current": name})
+                row = db[name]
+                mesh = row["mesh"]
+                solution = row["solutions"][0]
+                title = f'{row["fullname"]} ({name})'
+                fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
+                os.makedirs("output/plots", exist_ok=True)
+                fig.savefig(f"output/plots/{name}.png")
+                plt.close(fig)
+
+        elif args.cmd == "save-all-plots":
+            for name in (progress_bar := tqdm(db_filter(db), "Saving all plots", position=0)):
+                progress_bar.set_postfix({"current": name})
+                row = db[name]
+                mesh = row["mesh"]
+                title = f'{row["fullname"]} ({name})'
+                os.makedirs(f"output/plots/{name}", exist_ok=True)
+                for i, solution in enumerate(tqdm(row["solutions"], f"Saving {name}", position=1, leave=False)):
                     fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
-                    os.makedirs("output/plots", exist_ok=True)
-                    fig.savefig(f"output/plots/{name}.png")
+                    key = solution_stats(db, name, i)[1]
+                    fig.savefig(f"output/plots/{name}/{name}_{key}_{i}.png")
                     plt.close(fig)
 
-            elif args.cmd == "save-all-plots":
-                for name in (progress_bar := tqdm(db_filter(db), "Saving all plots", position=0)):
-                    progress_bar.set_postfix({"current": name})
-                    row = db[name]
-                    mesh = row["mesh"]
-                    title = f'{row["fullname"]} ({name})'
-                    os.makedirs(f"output/plots/{name}", exist_ok=True)
-                    for i, solution in enumerate(tqdm(row["solutions"], f"Saving {name}", position=1, leave=False)):
-                        fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
-                        fig.savefig(f"output/plots/{name}/{name}_{i}.png")
-                        plt.close(fig)
+        elif args.cmd == "solution-stats":
+            all_solution_stats(db, args.name, args.csv_file)
 
-            elif args.cmd == "solution-stats":
-                all_solution_stats(db, args.name, args.csv_file)
-
-        except KeyboardInterrupt:
-            print("KeyboardInterrupt")
-
-        db.sync()
-        db.close()
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt")
+    finally:
+        try:
+            if not args.readonly:
+                db.sync()
+            db.close()
+        except:
+            pass
 
     for h in logger.handlers:
         h.flush()
