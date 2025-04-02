@@ -11,6 +11,9 @@ import functools
 from collections import defaultdict
 import csv
 import json
+import multiprocessing
+import multiprocessing.pool
+import signal
 
 from typing import Any, Callable, TypeVar
 from collections.abc import Sequence
@@ -108,7 +111,7 @@ class Filter:
 
 
 def open_db(fname=DB_FILE, readonly=False) -> shelve.Shelf:
-    return shelve.open(fname, "r" if readonly else "c", writeback=True)
+    return shelve.open(fname, "r" if readonly else "c", writeback=not readonly)
 
 
 def load_mesh(db:shelve.Shelf, fname:str, clear=False) -> tuple[str,off.Mesh] | tuple[None,None]:
@@ -490,7 +493,7 @@ def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, 
     anim = animation.FuncAnimation(fig, func=functools.partial(anim_func, ax=ax, total=num_frames), frames=num_frames, interval=33)
     writer = animation.FFMpegWriter(fps=30, codec="libvpx-vp9", extra_args=["-crf", "30", "-b:v", "0"], metadata=metadata or {})
     os.makedirs("output/animation", exist_ok=True)
-    with tqdm(total=num_frames, desc=f"Saving animation {fname}", position=tqdm_position) as progress_bar:
+    with tqdm(total=num_frames, desc=f"Saving animation {fname}", position=tqdm_position, leave=False) as progress_bar:
         anim.save(f"output/animation/{fname}.webm", writer, progress_callback=lambda c,t: progress_bar.update(1))
 
 
@@ -617,12 +620,12 @@ def all_solution_stats(db:shelve.Shelf, name:str, csv_file:str) -> None:
         writer.writerows(output_rows)
 
 
-def find_nicest_solutions(db:shelve.Shelf, outfile:str=None) -> dict[str,list[int]]:
+def find_nicest_solutions(db:shelve.Shelf, db_filter:Filter=Filter(), outfile:str=None) -> dict[str,list[int]]:
     result:dict[str,list[int]] = {}
-    for name in (progress_bar0 := tqdm(db, "Finding nicest solutions", leave=False)):
+    for name in (progress_bar0 := tqdm(db_filter(db), "Finding nicest solutions", leave=False)):
         progress_bar0.set_postfix({"current": name})
         solutionnums_keys:list[tuple[int,tuple[int,...]]] = []
-        for i, s in enumerate(tqdm(db[name]["solutions"], leave=False, position=1)):
+        for i, s in enumerate(tqdm(db[name]["solutions"], f"Finding nicest solutions for {name}", leave=False, position=1)):
             solutionnums_keys.append((i, tuple(solution_stats(db, name, i)[1])))
         niceness_groups = group_by(solutionnums_keys, lambda x: x[1])
         nicest = [i[0] for i in niceness_groups[max(niceness_groups)]]
@@ -633,6 +636,30 @@ def find_nicest_solutions(db:shelve.Shelf, outfile:str=None) -> dict[str,list[in
             json.dump(result, f, indent="\t")
 
     return result
+
+
+def _parallel_save_animation_init(tqdm_lock):
+    tqdm.set_lock(tqdm_lock)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def parallel_save_animation(name:str, solution_num:int, *, total:int, db_file:str=DB_FILE, origin_vectors:float=0, show_edges=True, label_points=False):
+    pdb = open_db(db_file, readonly=True)
+    procname = multiprocessing.current_process().name
+    pos = int(procname.split("-")[1])
+
+    row = pdb[name]
+    mesh = row["mesh"]
+    solution = row["solutions"][solution_num]
+    title = f'{row["fullname"]} ({name})'
+    fig, ax = plot_solution(mesh, solution, title, origin_vectors, show_edges, label_points)
+    metadata = {
+        "title"       : title,
+        "description" : f"Minimum vertex-covering planes of the {title} (solution #{solution_num})",
+    }
+    animate_solution(fig, ax, animation_rotate, 120, f"{name}_{solution_num}", tqdm_position=pos, metadata=metadata)
+
+    pdb.close()
 
 
 if __name__ == "__main__":
@@ -710,7 +737,14 @@ if __name__ == "__main__":
     animate_solution_parser = subparsers.add_parser("animate-solution", aliases=["a"], help="animate a solution rotating", parents=[plot_parser, single_plot_parser, solution_plot_parser])
     animate_solution_parser.set_defaults(cmd="animate-solution", label_points=False)
 
-    #TODO: animate all
+    animate_all_meshes_parser = subparsers.add_parser("animate-all-meshes", aliases=["aam"], help='animate the "nicest" solutions for each mesh', parents=[plot_parser, filterable_parser])
+    animate_all_meshes_parser.set_defaults(cmd="animate-all-meshes")
+    animate_all_meshes_parser.add_argument("--limit", "-l", type=int, default=1, help='some meshes have multiple solutions of equal "niceness"; only animate this many of them. (Default: %(default)d)')
+    try:
+        processes_default = os.process_cpu_count()
+    except AttributeError:
+        processes_default = os.cpu_count()
+    animate_all_meshes_parser.add_argument("--threads", "-t", type=int, default=processes_default, help="parallelize with this many processes. Defaults to the number of available CPUs")
 
     save_plots_parser = subparsers.add_parser("save-plots", aliases=["sp"], help="save plot images", parents=[plot_parser, filterable_parser])
     save_plots_parser.set_defaults(cmd="save-plots")
@@ -800,6 +834,25 @@ if __name__ == "__main__":
                     "description" : f"Minimum vertex-covering planes of the {title} (solution #{args.solution})",
                 }
                 animate_solution(fig, ax, animation_rotate, 120, args.name, metadata=metadata)
+
+        elif args.cmd == "animate-all-meshes":
+            nicest_solutions = find_nicest_solutions(db, db_filter)
+            nicest_solutions_list = [(n,s) for n,sl in nicest_solutions.items() for s in sl[:args.limit]]
+            tqdm.set_lock(multiprocessing.RLock())
+            main_bar = tqdm(desc="Saving animations", total=len(nicest_solutions_list), smoothing=0)
+            main_bar.refresh()
+            pool = multiprocessing.Pool(min(args.threads, len(nicest_solutions_list)), initializer=_parallel_save_animation_init, initargs=(tqdm.get_lock(),))
+            try:
+                part = functools.partial(parallel_save_animation, total=len(nicest_solutions_list), origin_vectors=args.origin_vectors, show_edges=not args.hide_edges, label_points=args.label_points)
+                results:list[multiprocessing.pool.AsyncResult] = []
+                for name, solution_num in nicest_solutions_list:
+                    results.append(pool.apply_async(part, (name, solution_num), callback=lambda r: main_bar.update(1)))
+                pool.close()
+                for r in results:
+                    while not r.ready():
+                        time.sleep(0.01)
+            except KeyboardInterrupt:
+                pool.terminate()
 
         elif args.cmd == "save-plots":
             for name in (progress_bar := tqdm(db_filter(db), "Saving plots")):
