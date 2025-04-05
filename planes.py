@@ -15,7 +15,7 @@ import multiprocessing
 import multiprocessing.pool
 import signal
 
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Collection, TypeVar
 from collections.abc import Sequence
 
 from skspatial.objects import Plane, Point, Points, LineSegment, Vector
@@ -274,8 +274,94 @@ def _add_lower_bounds(db:shelve.Shelf) -> None:
         db.sync()
 
 
+def add_upper_bound_parallel_solutions(db:shelve.Shelf, name:str):
+    if db[name]["best_solution"] is None or db[name]["best_solution"] >= db[name]["upper_bound"]:
+        for i, c in enumerate(("x", "y", "z")):
+            if f"unique_{c}" in db[name]["ub_reason"]:
+                groups = group_by(db[name]["mesh"].points, lambda p: p.coords[i])
+                solution = [[v.index for v in g] for g in groups.values()]
+                add_solution(db, name, solution)
+
+
+def add_solution(db:shelve.Shelf, name:str, proposed_solution:Collection[Collection[int]]) -> bool:
+    """'manually' add a solution to the named mesh.
+    Checks performed:
+      * the solution is at least as good as existing solutions
+      * the solution is not already accepted
+      * the given planes are acutally coplanar
+        - adds any missing coplanar points to the planes
+      * the given planes acutally cover all points
+    Returns whether the solution was acutally added."""
+
+    proposed_solution_fs = frozenset([frozenset(i) for i in proposed_solution])
+
+    # check if the solution is at least as good as existing solutions
+    if db[name]["best_solution"] is not None and len(proposed_solution_fs) > db[name]["best_solution"]:
+        logger.info(f'solution not added to {name}: it is a worse solution ({len(proposed_solution_fs)} > {db[name]["best_solution"]}) ({proposed_solution_fs})')
+        return False
+
+    # check if the solution is already accepted
+    if (len(proposed_solution_fs) == db[name]["best_solution"]) and (proposed_solution_fs in db[name]["solutions"]):
+        logger.info(f'solution not added to {name}: already present ({proposed_solution_fs})')
+        return False
+
+    # find the submitted planes in the precalculated set of planes for this mesh
+    canonical_planes:list[frozenset[int]] = []
+    for proposed_plane in proposed_solution_fs:
+        if proposed_plane in db[name]["planes"]:
+            canonical_planes.append(proposed_plane)
+        else:
+            found_real_plane = False
+            for real_plane in db[name]["planes"]:
+                if proposed_plane <= real_plane:
+                    # the real plane will include any additional coplanar points
+                    logger.debug(f"[{name}] using real plane {real_plane} for proposed plane {proposed_plane}")
+                    canonical_planes.append(real_plane)
+                    found_real_plane = True
+                    break  # next proposed plane
+            if not found_real_plane:
+                logger.info(f"solution not added to {name}: no plane found for {proposed_plane}. Are you sure it's coplanar?")
+                return False
+
+    # check if the given planes acutally cover all points
+    covered_points = set([point_num for plane in canonical_planes for point_num in plane])
+    all_points = set(range(db[name]["mesh"].num_points))
+    if covered_points != all_points:
+        logger.info(f"solution not added to {name}: some points are not covered ({all_points - covered_points})")
+        return False
+
+    _add_solution_to_db(db, name, frozenset(canonical_planes))
+    return True
+
+
+def _add_solution_to_db(db:shelve.Shelf, name:str, solution:frozenset[frozenset[int]], seconds=0):
+    """actually do the work of adding a solution. this does not check that the solution is valid"""
+
+    solution_size = len(solution)
+
+    oversize_warning = ""
+    if solution_size > db[name]["upper_bound"]:
+        oversize_warning = f' (worse than known upper bound {db[name]["upper_bound"]})'
+
+    if db[name]["best_solution"] is None:
+        db[name]["best_solution"] = solution_size
+        db[name]["solutions"] = [solution]
+        db[name]["num_solutions"] = 1
+        logger.info(f"[{name}] Found solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
+    elif solution_size < db[name]["best_solution"]:
+        db[name]["best_solution"] = solution_size
+        db[name]["solutions"] = [solution]
+        db[name]["num_solutions"] = 1
+        logger.info(f"[{name}] Found better solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
+    elif db[name]["best_solution"] == solution_size and solution not in db[name]["solutions"]:
+        db[name]["solutions"].append(solution)
+        db[name]["num_solutions"] += 1
+        logger.info(f"[{name}]\tFound alternate solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
+
+    db.sync()
+
+
 def minimum_covering_planes(db:shelve.Shelf, name:str, exclude_3s=False) -> tuple[int,frozenset[frozenset[int]],float]:
-    # logger.debug(f"calculating minimum covering planes of {name}")
     mesh:off.Mesh = db[name]["mesh"]
     planes_list:list[frozenset[int]] = list(db[name]["planes"])
     plane_sort_key = lambda x: (len(x), sorted(x))
@@ -294,29 +380,10 @@ def minimum_covering_planes(db:shelve.Shelf, name:str, exclude_3s=False) -> tupl
     seconds = minutes * 60
     solution_size = int(solution_size)
 
-    oversize_warning = ""
-    if solution_size > db[name]["upper_bound"]:
-        oversize_warning = f' (worse than known upper bound {db[name]["upper_bound"]})'
-
     solution_set_indexes = [int(i) for i in range(len(sc.s)) if sc.s[i]]
     solution = frozenset(planes_list[i] for i in solution_set_indexes)
 
-    if db[name]["best_solution"] is None:
-        db[name]["best_solution"] = solution_size
-        db[name]["solutions"] = [solution]
-        db[name]["num_solutions"] = 1
-        logger.info(f"[{name}] Found solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
-    elif solution_size < db[name]["best_solution"]:
-        db[name]["best_solution"] = solution_size
-        db[name]["solutions"] = [solution]
-        db[name]["num_solutions"] = 1
-        logger.info(f"[{name}] Found better solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
-    elif db[name]["best_solution"] == solution_size and solution not in db[name]["solutions"]:
-        db[name]["solutions"].append(solution)
-        db[name]["num_solutions"] += 1
-        logger.info(f"[{name}]\tFound alternate solution: {solution_size} (in {seconds:.2f}s)" + oversize_warning)
-
-    db.sync()
+    _add_solution_to_db(db, name, solution, seconds)
 
     return (solution_size, solution, seconds)
 
@@ -489,12 +556,15 @@ def animation_rotate(i:int, *, ax:Axes3D, total:int):
     ax.view_init(*rotation_function(i, total))
 
 
-def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, fname:str, tqdm_position:int=0, metadata=None):
+def animate_solution(fig:Figure, ax:Axes3D, anim_func:Callable, num_frames:int, fname:str, tqdm_position:int=0, metadata=None, subfolder:str=None):
     anim = animation.FuncAnimation(fig, func=functools.partial(anim_func, ax=ax, total=num_frames), frames=num_frames, interval=33)
     writer = animation.FFMpegWriter(fps=30, codec="libvpx-vp9", extra_args=["-crf", "30", "-b:v", "0"], metadata=metadata or {})
-    os.makedirs("output/animation", exist_ok=True)
+    outfolder = "output/animation"
+    if subfolder:
+        outfolder = os.path.join(outfolder, subfolder)
+    os.makedirs(outfolder, exist_ok=True)
     with tqdm(total=num_frames, desc=f"Saving animation {fname}", position=tqdm_position, leave=False) as progress_bar:
-        anim.save(f"output/animation/{fname}.webm", writer, progress_callback=lambda c,t: progress_bar.update(1))
+        anim.save(os.path.join(outfolder, f"{fname}.webm"), writer, progress_callback=lambda c,t: progress_bar.update(1))
 
 
 TABLE_COLUMN_DEFS = {
@@ -575,13 +645,12 @@ def find_parallel_groups(db:shelve.Shelf, name:str, solution_num:int):
     return group_by(solution, key)
 
 
-def solution_stats(db:shelve.Shelf, name:str, solution_num:int) -> dict[str,Any]:
+def solution_stats(db:shelve.Shelf, name:str, solution_num:int) -> tuple[dict[str,Any],list[Any]]:
     result = {
         "name"       : name,
         "solution #" : solution_num
     }
     key = []
-    niceness = 0
 
     point_use_counts = find_point_use_counts(list(db[name]["solutions"][solution_num]))
     num_reused_points = [i>1 for i in point_use_counts].count(True)
@@ -597,14 +666,10 @@ def solution_stats(db:shelve.Shelf, name:str, solution_num:int) -> dict[str,Any]
         value = parallel_group_size_counts[i] * i
         result[f"||{i:02d}"] = value
         key.append(value)
-        niceness += value * (db[name]["best_solution"] ** i)
 
     key.reverse()
 
-    for i, count in enumerate(point_use_counts):
-        result[f"p{i:02d} uses"] = count
-
-    return (result, key, niceness)  # I hate this
+    return (result, key)  # I hate this
 
 
 def all_solution_stats(db:shelve.Shelf, name:str, csv_file:str) -> None:
@@ -657,8 +722,9 @@ def parallel_save_animation(name:str, solution_num:int, *, total:int, db_file:st
         "title"       : title,
         "description" : f"Minimum vertex-covering planes of the {title} (solution #{solution_num})",
     }
-    animate_solution(fig, ax, animation_rotate, 120, f"{name}_{solution_num}", tqdm_position=pos, metadata=metadata)
+    animate_solution(fig, ax, animation_rotate, 120, f"{name}_{solution_num}", tqdm_position=pos, metadata=metadata, subfolder=name)
 
+    plt.close(fig)
     pdb.close()
 
 
@@ -772,6 +838,8 @@ if __name__ == "__main__":
 
         elif args.cmd == "find-planes":
             find_all_planes(db, db_filter, args.overwrite)
+            for name in db:
+                add_upper_bound_parallel_solutions(db, name)
 
         elif args.cmd == "minimum-covering-planes":
             if args.loop:
