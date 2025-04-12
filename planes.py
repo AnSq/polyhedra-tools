@@ -14,6 +14,7 @@ import json
 import multiprocessing
 import multiprocessing.pool
 import signal
+import enum
 
 from typing import Any, Callable, Collection, TypeVar
 from collections.abc import Sequence
@@ -425,6 +426,7 @@ def plot_solution(mesh:off.Mesh, planes_fs:frozenset[frozenset[int]], title:str,
     ax:Axes3D
     fig, ax = plt.subplots(figsize=(4.8, 4.8), subplot_kw={"projection": "3d"})
     ax.set_axis_off()
+    ax.set_proj_type("persp", 0.25)
     colors = matplotlib.color_sequences["petroff10"]
     fontfamily = "Montserrat"
     matplotlib.rc("font", family=fontfamily)
@@ -728,6 +730,26 @@ def parallel_save_animation(name:str, solution_num:int, *, total:int, db_file:st
     pdb.close()
 
 
+class Command (enum.StrEnum):
+    @staticmethod
+    def _generate_next_value_(name:str, start:int, count:int, last_values:list[str]) -> str:
+        return name.lower().replace("_", "-")
+
+    LOAD_MESH = enum.auto()
+    LOAD_MESH_DIR = enum.auto()
+    FIND_PLANES = enum.auto()
+    MINIMUM_COVERING_PLANES = enum.auto()
+    ALL_MINIMUM_COVERING_PLANES = enum.auto()
+    LIST = enum.auto()
+    PLOT_MESH = enum.auto()
+    PLOT_SOLUTION = enum.auto()
+    ANIMATE_SOLUTION = enum.auto()
+    ANIMATE_ALL_MESHES = enum.auto()
+    SAVE_PLOTS = enum.auto()
+    SAVE_ALL_PLOTS = enum.auto()
+    SOLUTION_STATS = enum.auto()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.set_defaults(readonly=False)
@@ -744,39 +766,39 @@ if __name__ == "__main__":
     filterable_parser_group.add_argument("--lower-bound", "--lb", choices=Filter.BOUND_OPTIONS, help="filter by solution size's relationship to the lower bound")
     filterable_parser_group.add_argument("--upper-bound", "--ub", choices=Filter.BOUND_OPTIONS, help="filter by solution size's relationship to the upper bound")
 
-    load_mesh_parser = subparsers.add_parser("load-mesh", aliases=["lm"], help="load a mesh file")
-    load_mesh_parser.set_defaults(cmd="load-mesh")
+    load_mesh_parser = subparsers.add_parser(Command.LOAD_MESH, aliases=["lm"], help="load a mesh file")
+    load_mesh_parser.set_defaults(cmd=Command.LOAD_MESH)
     load_mesh_parser.add_argument("meshfile", help=".off file to load")
     load_mesh_parser.add_argument("--clear", action="store_true", help="if the mesh already exists in the db, delete the entire db entry (planes, solutions, etc) for the mesh before reloading it")
 
-    load_meshes_parser = subparsers.add_parser("load-mesh-dir", aliases=["lmd"], help="load all mesh files in a directory")
-    load_meshes_parser.set_defaults(cmd="load-mesh-dir")
+    load_meshes_parser = subparsers.add_parser(Command.LOAD_MESH_DIR, aliases=["lmd"], help="load all mesh files in a directory")
+    load_meshes_parser.set_defaults(cmd=Command.LOAD_MESH_DIR)
     load_meshes_parser.add_argument("dir", help="directory to search for .off files to load")
     load_meshes_parser.add_argument("--clear", action="store_true", help="if a mesh already exists in the db, delete the entire db entry (planes, solutions, etc) for the mesh before reloading it")
 
-    find_planes_parser = subparsers.add_parser("find-planes", aliases=["fp"], help="find all sets of coplanar vertices for loaded meshes", parents=[filterable_parser])
-    find_planes_parser.set_defaults(cmd="find-planes")
+    find_planes_parser = subparsers.add_parser(Command.FIND_PLANES, aliases=["fp"], help="find all sets of coplanar vertices for loaded meshes", parents=[filterable_parser])
+    find_planes_parser.set_defaults(cmd=Command.FIND_PLANES)
     find_planes_parser.add_argument("--overwrite", action="store_true", help="recalculate and overwrite planes (otherwise meshes with planes already will be skipped)")
 
-    minimum_covering_planes_parser = subparsers.add_parser("minimum-covering-planes", aliases=["mcp"], help="find the minimum covering planes of the given mesh", parents=[loopable_parser])
-    minimum_covering_planes_parser.set_defaults(cmd="minimum-covering-planes")
+    minimum_covering_planes_parser = subparsers.add_parser(Command.MINIMUM_COVERING_PLANES, aliases=["mcp"], help="find the minimum covering planes of the given mesh", parents=[loopable_parser])
+    minimum_covering_planes_parser.set_defaults(cmd=Command.MINIMUM_COVERING_PLANES)
     minimum_covering_planes_parser.add_argument("name", help="name of the mesh")
     minimum_covering_planes_parser.add_argument("--quiet", "-q", action="store_true", help="don't print full solution. Only print when there's a new solution")
     minimum_covering_planes_parser.add_argument("--exclude-3s", "-3", action="store_true", help="don't consider 3-point planes when finding a solution")
 
-    all_minimum_covering_planes_parser = subparsers.add_parser("all-minimum-covering-planes", aliases=["amcp"], help="find the minimum covering planes of all meshes", parents=[loopable_parser, filterable_parser])
-    all_minimum_covering_planes_parser.set_defaults(cmd="all-minimum-covering-planes")
+    all_minimum_covering_planes_parser = subparsers.add_parser(Command.ALL_MINIMUM_COVERING_PLANES, aliases=["amcp"], help="find the minimum covering planes of all meshes", parents=[loopable_parser, filterable_parser])
+    all_minimum_covering_planes_parser.set_defaults(cmd=Command.ALL_MINIMUM_COVERING_PLANES)
     all_minimum_covering_planes_parser.add_argument("--dynamic-filter", "--df", action="store_true", help="recompute the filter every loop")
 
     list_parser = subparsers.add_parser(
-        "list",
+        Command.LIST,
         aliases=["l"],
         help="list some stuff about meshes in the database",
         epilog=f"Available columns are:\n{chr(10).join(f'  {k}: {v[0]}' for k,v in TABLE_COLUMN_DEFS.items())}\nYou can also use the special column option 'a', which is equivalent to '{ALL_COLUMNS}'",  # chr(10) is newline, because backslashes "aren't allowed" in f-string expressions
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[filterable_parser]
     )
-    list_parser.set_defaults(cmd="list", readonly=True)
+    list_parser.set_defaults(cmd=Command.LIST, readonly=True)
     list_parser.add_argument("--columns", "-c", default="nsSuU", help="which columns to show. See below for options. Default: '%(default)s'")
     list_parser.add_argument("--csv", metavar="FNAME", dest="csv_file", help="write to the given CSV file instead of printing a table")
 
@@ -794,17 +816,17 @@ if __name__ == "__main__":
     solution_plot_parser = argparse.ArgumentParser(add_help=False)
     solution_plot_parser.add_argument("--solution", "-s", type=int, default=0, help="solution number")
 
-    plot_mesh_parser = subparsers.add_parser("plot-mesh", aliases=["pm"], help="make a 3d plot of a mesh, without showing solution", parents=[plot_parser, single_plot_parser])
-    plot_mesh_parser.set_defaults(cmd="plot-mesh")
+    plot_mesh_parser = subparsers.add_parser(Command.PLOT_MESH, aliases=["pm"], help="make a 3d plot of a mesh, without showing solution", parents=[plot_parser, single_plot_parser])
+    plot_mesh_parser.set_defaults(cmd=Command.PLOT_MESH)
 
-    plot_solution_parser = subparsers.add_parser("plot-solution", aliases=["plot", "p"], help="make a 3d plot of a solution", parents=[plot_parser, single_plot_parser, solution_plot_parser])
-    plot_solution_parser.set_defaults(cmd="plot-solution")
+    plot_solution_parser = subparsers.add_parser(Command.PLOT_SOLUTION, aliases=["plot", "p"], help="make a 3d plot of a solution", parents=[plot_parser, single_plot_parser, solution_plot_parser])
+    plot_solution_parser.set_defaults(cmd=Command.PLOT_SOLUTION)
 
-    animate_solution_parser = subparsers.add_parser("animate-solution", aliases=["a"], help="animate a solution rotating", parents=[plot_parser, single_plot_parser, solution_plot_parser])
-    animate_solution_parser.set_defaults(cmd="animate-solution", label_points=False)
+    animate_solution_parser = subparsers.add_parser(Command.ANIMATE_SOLUTION, aliases=["a"], help="animate a solution rotating", parents=[plot_parser, single_plot_parser, solution_plot_parser])
+    animate_solution_parser.set_defaults(cmd=Command.ANIMATE_SOLUTION, label_points=False)
 
-    animate_all_meshes_parser = subparsers.add_parser("animate-all-meshes", aliases=["aam"], help='animate the "nicest" solutions for each mesh', parents=[plot_parser, filterable_parser])
-    animate_all_meshes_parser.set_defaults(cmd="animate-all-meshes")
+    animate_all_meshes_parser = subparsers.add_parser(Command.ANIMATE_ALL_MESHES, aliases=["aam"], help='animate the "nicest" solutions for each mesh', parents=[plot_parser, filterable_parser])
+    animate_all_meshes_parser.set_defaults(cmd=Command.ANIMATE_ALL_MESHES)
     animate_all_meshes_parser.add_argument("--limit", "-l", type=int, default=1, help='some meshes have multiple solutions of equal "niceness"; only animate this many of them. (Default: %(default)d)')
     try:
         processes_default = os.process_cpu_count()
@@ -812,16 +834,16 @@ if __name__ == "__main__":
         processes_default = os.cpu_count()
     animate_all_meshes_parser.add_argument("--threads", "-t", type=int, default=processes_default, help="parallelize with this many processes. Defaults to the number of available CPUs")
 
-    save_plots_parser = subparsers.add_parser("save-plots", aliases=["sp"], help="save plot images", parents=[plot_parser, filterable_parser])
-    save_plots_parser.set_defaults(cmd="save-plots")
+    save_plots_parser = subparsers.add_parser(Command.SAVE_PLOTS, aliases=["sp"], help="save plot images", parents=[plot_parser, filterable_parser])
+    save_plots_parser.set_defaults(cmd=Command.SAVE_PLOTS)
 
-    save_all_plots_parser = subparsers.add_parser("save-all-plots", aliases=["sap"], help="save plot images for every solution in the database", parents=[plot_parser, filterable_parser])
-    save_all_plots_parser.set_defaults(cmd="save-all-plots")
+    save_all_plots_parser = subparsers.add_parser(Command.SAVE_ALL_PLOTS, aliases=["sap"], help="save plot images for every solution in the database", parents=[plot_parser, filterable_parser])
+    save_all_plots_parser.set_defaults(cmd=Command.SAVE_ALL_PLOTS)
 
     # ^^^   Plotting Args   ^^^
 
-    solution_stats_parser = subparsers.add_parser("solution-stats", aliases=["t"], help="show stats of all solutions for a mesh", parents=[single_plot_parser])
-    solution_stats_parser.set_defaults(cmd="solution-stats", readonly=True)
+    solution_stats_parser = subparsers.add_parser(Command.SOLUTION_STATS, aliases=["t"], help="show stats of all solutions for a mesh", parents=[single_plot_parser])
+    solution_stats_parser.set_defaults(cmd=Command.SOLUTION_STATS, readonly=True)
     solution_stats_parser.add_argument("csv_file", help="file to output")
 
     args = parser.parse_args()
@@ -830,18 +852,18 @@ if __name__ == "__main__":
 
     db = open_db(readonly=args.readonly)
     try:
-        if args.cmd == "load-mesh":
+        if args.cmd == Command.LOAD_MESH:
             load_mesh(db, args.meshfile, args.clear)
 
-        elif args.cmd == "load-mesh-dir":
+        elif args.cmd == Command.LOAD_MESH_DIR:
             load_meshes(db, args.dir, args.clear)
 
-        elif args.cmd == "find-planes":
+        elif args.cmd == Command.FIND_PLANES:
             find_all_planes(db, db_filter, args.overwrite)
             for name in db:
                 add_upper_bound_parallel_solutions(db, name)
 
-        elif args.cmd == "minimum-covering-planes":
+        elif args.cmd == Command.MINIMUM_COVERING_PLANES:
             if args.loop:
                 stream_handler.setLevel(logging.ERROR)
             try:
@@ -860,7 +882,7 @@ if __name__ == "__main__":
 
                 print(f"\nexiting after {n_loops} loops")
 
-        elif args.cmd == "all-minimum-covering-planes":
+        elif args.cmd == Command.ALL_MINIMUM_COVERING_PLANES:
             if args.loop:
                 stream_handler.setLevel(logging.ERROR)
             try:
@@ -882,28 +904,28 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 print(f"\nexiting after {n_loops} loops")
 
-        elif args.cmd == "list":
+        elif args.cmd == Command.LIST:
             list_database(db, db_filter, args.columns, args.csv_file)
 
-        elif args.cmd in ("plot-mesh", "plot-solution", "animate-solution"):
+        elif args.cmd in (Command.PLOT_MESH, Command.PLOT_SOLUTION, Command.ANIMATE_SOLUTION):
             row = db[args.name]
             mesh = row["mesh"]
-            if args.cmd == "plot-mesh":
+            if args.cmd == Command.PLOT_MESH:
                 solution = frozenset()
             else:
                 solution = row["solutions"][args.solution]
             title = f'{row["fullname"]} ({args.name})'
             fig, ax = plot_solution(mesh, solution, title, args.origin_vectors, not args.hide_edges, args.label_points)
-            if args.cmd in ("plot-mesh", "plot-solution"):
+            if args.cmd in (Command.PLOT_MESH, Command.PLOT_SOLUTION):
                 plt.show()
-            elif args.cmd == "animate-solution":
+            elif args.cmd == Command.ANIMATE_SOLUTION:
                 metadata = {
                     "title"       : title,
                     "description" : f"Minimum vertex-covering planes of the {title} (solution #{args.solution})",
                 }
                 animate_solution(fig, ax, animation_rotate, 120, args.name, metadata=metadata)
 
-        elif args.cmd == "animate-all-meshes":
+        elif args.cmd == Command.ANIMATE_ALL_MESHES:
             nicest_solutions = find_nicest_solutions(db, db_filter)
             nicest_solutions_list = [(n,s) for n,sl in nicest_solutions.items() for s in sl[:args.limit]]
             tqdm.set_lock(multiprocessing.RLock())
@@ -922,7 +944,7 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 pool.terminate()
 
-        elif args.cmd == "save-plots":
+        elif args.cmd == Command.SAVE_PLOTS:
             for name in (progress_bar := tqdm(db_filter(db), "Saving plots")):
                 progress_bar.set_postfix({"current": name})
                 row = db[name]
@@ -934,7 +956,7 @@ if __name__ == "__main__":
                 fig.savefig(f"output/plots/{name}.png")
                 plt.close(fig)
 
-        elif args.cmd == "save-all-plots":
+        elif args.cmd == Command.SAVE_ALL_PLOTS:
             for name in (progress_bar := tqdm(db_filter(db), "Saving all plots", position=0)):
                 progress_bar.set_postfix({"current": name})
                 row = db[name]
@@ -947,7 +969,7 @@ if __name__ == "__main__":
                     fig.savefig(f"output/plots/{name}/{name}_{key}_{i}.png")
                     plt.close(fig)
 
-        elif args.cmd == "solution-stats":
+        elif args.cmd == Command.SOLUTION_STATS:
             all_solution_stats(db, args.name, args.csv_file)
 
     except KeyboardInterrupt:
