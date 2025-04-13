@@ -141,6 +141,15 @@ class Face:
         return str(self)
 
 
+    def __eq__(self, other:object) -> bool:
+        if isinstance(other, self.__class__):
+            # equal if their points are equal. index doesn't matter
+            return self.points == other.points
+        else:
+            return False
+
+
+
     def points_array(self) -> list[list[float]]:
         return [p.coords for p in self.points]
 
@@ -181,6 +190,25 @@ class Mesh:
 
     def __repr__(self) -> str:
         return str(self)
+
+
+    def __eq__(self, other:object) -> bool:
+        if not isinstance(other, self.__class__):
+            return False
+
+        # This could be done just by comparing .points, .edges, and .faces, and that would probably be fine,
+        # but that wouldn't check all the point and face indices. This approach does, which is probably overkill.
+
+        if not all((p0 == p1 and p0.index == p1.index) for p0, p1 in zip(self.points, other.points)):
+            return False
+        if self.edges != other.edges:
+            return False
+        for f0, f1 in zip(self.faces, other.faces):
+            if f0.index != f1.index:
+                return False
+            if not all((p0 == p1 and p0.index == p1.index) for p0, p1 in zip(f0.points, f1.points)):
+                return False
+        return True
 
 
     @classmethod
@@ -251,6 +279,21 @@ class Mesh:
     @property
     def num_faces(self):
         return len(self.faces)
+
+
+    def to_string(self) -> str:
+        result = f"OFF\n{self.num_points} {self.num_faces} {self.num_edges}\n\n# Vertices\n"
+        for v in self.points:
+            result += f"{v.x} {v.y} {v.z}\n"
+        result += "\n# Faces\n"
+        for f in self.faces:
+            result += f"{len(f.points)} {' '.join(str(v.index) for v in f.points)}\n"
+        return result
+
+
+    def save(self, fname:str) -> None:
+        with open(fname, "w") as f:
+            f.write(self.to_string())
 
 
     def get_point_face_use_counts(self) -> list[int]:
@@ -372,26 +415,58 @@ class Mesh:
         return all((ndp, nup, nde, ccp, cce, cpf, iec, ufr, uel))
 
 
+def test_export(dirname:str):
+    if os.path.isdir(dirname):
+        all_pass = True
+        for fname in os.listdir(dirname):
+            fullname = os.path.join(dirname, fname)
+            if fullname.endswith(".off") and os.path.isfile(fullname):
+                with open(fullname) as f:
+                    input_str = f.read()
+                mesh = Mesh.loads(input_str)
+                output_str = mesh.to_string()
+                mesh2 = Mesh.loads(output_str)
+                eq = (mesh == mesh2)
+                if not eq:
+                    all_pass = False
+                print(f"{passfail(eq)}  {fullname}")
+        print(f"\n{passfail(all_pass)}")
+    elif os.path.isfile(dirname):
+        with open(dirname) as f:
+            input_str = f.read()
+        mesh = Mesh.loads(input_str)
+        output_str = mesh.to_string()
+        mesh2 = Mesh.loads(output_str)
+        eq = (mesh == mesh2)
+        print(f"{passfail(eq)}  {dirname}")
+        if not eq:
+            import difflib
+            print("".join(difflib.unified_diff(input_str.splitlines(True), output_str.splitlines(True), "input", "output")), end="")
+
+
 if __name__ == "__main__":
     import sys, os
     f = sys.argv[1]
-    include_unit_edges = len(sys.argv) > 2 and sys.argv[2] == "-e"
-    result = True
-    if os.path.isdir(f):
-        for fname in os.listdir(f):
-            fullname = os.path.join(f, fname)
-            if fullname.endswith(".off") and os.path.isfile(fullname):
-                print(f"\n{fname}")
-                mesh = Mesh.load(fullname)
-                result = all((mesh.all_checks(include_unit_edges), result))
-    elif os.path.isfile(f):
-        mesh = Mesh.load(f)
-        result = mesh.all_checks(include_unit_edges)
+    if len(sys.argv) > 2 and sys.argv[2] == "-x":
+        test_export(f)
     else:
-        print(f"Invalid input: {f}")
-        result = False
+        include_unit_edges = len(sys.argv) > 2 and sys.argv[2] == "-e"
+        result = True
+        if os.path.isdir(f):
+            for fname in os.listdir(f):
+                fullname = os.path.join(f, fname)
+                if fullname.endswith(".off") and os.path.isfile(fullname):
+                    print(f"\n{fname}")
+                    mesh = Mesh.load(fullname)
+                    result = all((mesh.all_checks(include_unit_edges), result))
+        elif os.path.isfile(f):
+            mesh = Mesh.load(f)
+            result = mesh.all_checks(include_unit_edges)
+        else:
+            print(f"Invalid input: {f}")
+            result = False
 
-    if result:
-        print("\nAll checks PASSED")
-    else:
-        print("\nSome checks FAILED")
+        if result:
+            print("\nAll checks PASSED")
+        else:
+            print("\nSome checks FAILED")
