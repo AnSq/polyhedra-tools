@@ -14,3 +14,5 @@ names.py
 *.webm
 *.log
 .~lock.*
+
+!dumpformat.schema.json

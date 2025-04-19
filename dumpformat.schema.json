@@ -1,0 +1,51 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "planes database dump format",
+    "$defs": {
+        "pointIndexPlane": {
+            "type": "array",
+            "items": {
+                "type": "integer",
+                "minimum": 0
+            }
+        },
+        "planeSet": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/pointIndexPlane"}
+        }
+    },
+    "type": "object",
+    "additionalProperties": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "fullname": {"type": "string"},
+            "upper_bound": {"type": "integer"},
+            "ub_reason": {"type": "string"},
+            "best_solution": {"type": ["integer", "null"]},
+            "num_solutions": {"type": "integer"},
+            "solutions": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/planeSet"}
+            },
+            "planes": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/pointIndexPlane"}
+            },
+            "lower_bound": {"type": "integer"},
+            "mesh": {"type": "string"}
+        },
+        "required": [
+            "name",
+            "fullname",
+            "upper_bound",
+            "ub_reason",
+            "best_solution",
+            "num_solutions",
+            "solutions",
+            "planes",
+            "lower_bound",
+            "mesh"
+        ]
+    }
+}

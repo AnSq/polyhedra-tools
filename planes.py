@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 import os
+import sys
 import re
 import time
 import itertools
 import math
 import shelve
+import dbm
 import logging
 import argparse
 import functools
@@ -37,6 +39,7 @@ import matplotlib.legend_handler
 from tabulate import tabulate
 from tqdm import tqdm  #type: ignore
 import natsort
+import jsonschema
 
 import off
 
@@ -57,6 +60,7 @@ setcover.np.seterr(divide="ignore", invalid="ignore")
 TOLERANCE = 1e-12
 ROUND_DIGITS = int(-math.log10(TOLERANCE))
 DB_FILE = "database.db"
+DB_DUMP_SCHEMA_FILE = "dumpformat.schema.json"
 
 
 
@@ -113,6 +117,68 @@ class Filter:
 
 def open_db(fname=DB_FILE, readonly=False) -> shelve.Shelf:
     return shelve.open(fname, "r" if readonly else "c", writeback=not readonly)
+
+
+def _json_dumper(o:Any) -> Any:
+    if isinstance(o, shelve.Shelf):
+        return dict(o)
+    if isinstance(o, (set, frozenset)):
+        return list(o)
+    if isinstance(o, off.Mesh):
+        return o.to_string()
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+
+def dump_db(db:shelve.Shelf, fname:str) -> None:
+    """export the database to a json file"""
+    with open(fname, "w") as f:
+        json.dump(db, f, separators=(",",":"), default=_json_dumper)
+
+
+def load_db(fname:str, db:shelve.Shelf) -> None:
+    """import the database from a json file"""
+    if db:
+        print("Database is not empty. Not loading.")
+        return
+
+    with open(fname) as f:
+        data:dict[str,dict[str,Any]] = json.load(f)
+    with open(DB_DUMP_SCHEMA_FILE) as f:
+        schema = json.load(f)
+
+    print("Validating JSON format...", end=" ", flush=True)
+    try:
+        jsonschema.validate(data, schema)
+    except jsonschema.ValidationError:
+        print("failed\nThe JSON file is not in the expected format. Not Loading.")
+        return
+    print("done\nLoading...")
+
+    result:dict[str,dict[str,Any]] = {}
+    for name, data_row in data.items():
+        try:
+            row = {
+                "name":          data_row["name"],
+                "fullname":      data_row["fullname"],
+                "upper_bound":   data_row["upper_bound"],
+                "ub_reason":     data_row["ub_reason"],
+                "best_solution": data_row["best_solution"],
+                "num_solutions": data_row["num_solutions"],
+                "solutions":     [frozenset([frozenset(pln) for pln in sln]) for sln in data_row["solutions"]],
+                "planes":        set([frozenset(pln) for pln in data_row["planes"]]),
+                "lower_bound":   data_row["lower_bound"],
+                "mesh":          off.Mesh.loads(data_row["mesh"], info=f"load_db {fname}#{name}")
+            }
+        except Exception as e:
+            print("Error loading database")
+            print(repr(e))
+            return
+        result[name] = row
+
+    for name, row in result.items():
+        db[name] = row
+    db.sync()
+    print("Database loaded")
 
 
 def load_mesh(db:shelve.Shelf, fname:str, clear=False) -> tuple[str,off.Mesh] | tuple[None,None]:
@@ -748,11 +814,14 @@ class Command (enum.StrEnum):
     SAVE_PLOTS = enum.auto()
     SAVE_ALL_PLOTS = enum.auto()
     SOLUTION_STATS = enum.auto()
+    EXPORT_DATABASE = enum.auto()
+    IMPORT_DATABASE = enum.auto()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.set_defaults(readonly=False)
+    parser.add_argument("--database", "--db", default=DB_FILE)
     subparsers = parser.add_subparsers(title="commands", required=True)
 
     loopable_parser = argparse.ArgumentParser(add_help=False)
@@ -806,9 +875,10 @@ if __name__ == "__main__":
 
     plot_parser = argparse.ArgumentParser(add_help=False)
     plot_parser.set_defaults(readonly=True)
-    plot_parser.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
-    plot_parser.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
-    plot_parser.add_argument("--label-points", "-p", action="store_true", help="show point index numbers")
+    plot_parser_group = plot_parser.add_argument_group("Plotting options")
+    plot_parser_group.add_argument("--origin-vectors", "-O", type=float, default=0, metavar="SIZE", help="show x, y, and z vectors from the origin of the given size")
+    plot_parser_group.add_argument("--hide-edges", "-e", action="store_true", help="don't show mesh edges in plot")
+    plot_parser_group.add_argument("--label-points", "-p", action="store_true", help="show point index numbers")
 
     single_plot_parser = argparse.ArgumentParser(add_help=False)
     single_plot_parser.add_argument("name", help="which mesh to show")
@@ -829,7 +899,7 @@ if __name__ == "__main__":
     animate_all_meshes_parser.set_defaults(cmd=Command.ANIMATE_ALL_MESHES)
     animate_all_meshes_parser.add_argument("--limit", "-l", type=int, default=1, help='some meshes have multiple solutions of equal "niceness"; only animate this many of them. (Default: %(default)d)')
     try:
-        processes_default = os.process_cpu_count()
+        processes_default = os.process_cpu_count()  # python 3.13+
     except AttributeError:
         processes_default = os.cpu_count()
     animate_all_meshes_parser.add_argument("--threads", "-t", type=int, default=processes_default, help="parallelize with this many processes. Defaults to the number of available CPUs")
@@ -846,11 +916,24 @@ if __name__ == "__main__":
     solution_stats_parser.set_defaults(cmd=Command.SOLUTION_STATS, readonly=True)
     solution_stats_parser.add_argument("csv_file", help="file to output")
 
+    export_database_parser = subparsers.add_parser(Command.EXPORT_DATABASE, aliases=["e"], help="export the database to a json file")
+    export_database_parser.set_defaults(cmd=Command.EXPORT_DATABASE, readonly=True)
+    export_database_parser.add_argument("json_file", help="file to output")
+
+    import_database_parser = subparsers.add_parser(Command.IMPORT_DATABASE, aliases=["i"], help="import a database from a json file")
+    import_database_parser.set_defaults(cmd=Command.IMPORT_DATABASE)
+    import_database_parser.add_argument("json_file", help="file to load")
+
     args = parser.parse_args()
     if getattr(args, "filterable", False):
         db_filter = Filter(args.name_re, args.solution_range, args.lower_bound, args.upper_bound)
 
-    db = open_db(readonly=args.readonly)
+    try:
+        db = open_db(args.database, readonly=args.readonly)
+    except dbm.error[0]:
+        print("Database error. Maybe the file doesn't exist?")
+        sys.exit()
+
     try:
         if args.cmd == Command.LOAD_MESH:
             load_mesh(db, args.meshfile, args.clear)
@@ -971,6 +1054,12 @@ if __name__ == "__main__":
 
         elif args.cmd == Command.SOLUTION_STATS:
             all_solution_stats(db, args.name, args.csv_file)
+
+        elif args.cmd == Command.EXPORT_DATABASE:
+            dump_db(db, args.json_file)
+
+        elif args.cmd == Command.IMPORT_DATABASE:
+            load_db(args.json_file, db)
 
     except KeyboardInterrupt:
         print("KeyboardInterrupt")
