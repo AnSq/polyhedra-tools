@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+
+__author__ = "AnSq"
+__copyright__ = "Copyright 2025 AnSq"
+__license__ = "MIT"
+
 import os
 import sys
 import re
@@ -235,6 +240,7 @@ def load_meshes(db:shelve.Shelf, folder:str, clear=False):
 def find_planes(mesh:off.Mesh, name:str=None) -> PlaneSet:
     """find all sets of coplanar vertices for a mesh"""
 
+    # check that faces are coplanar
     f_errors = {}
     for f in mesh.faces:
         if len(f.points) > 3:

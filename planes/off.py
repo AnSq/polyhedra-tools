@@ -1,5 +1,9 @@
 #!/usr/bin/env python
 
+__author__ = "AnSq"
+__copyright__ = "Copyright 2025 AnSq"
+__license__ = "MIT"
+
 from typing import Any, TypeVar, TYPE_CHECKING
 import warnings
 import logging
